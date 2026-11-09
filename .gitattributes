@@ -1,0 +1,5 @@
+# The Gradle wrapper only runs where its shebang is intact: Windows checkouts otherwise rewrite
+# gradlew with CRLF and every Linux build fails with "bad interpreter".
+gradlew text eol=lf
+gradlew.bat text eol=crlf
+*.sh text eol=lf
