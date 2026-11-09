@@ -889,13 +889,45 @@ fun SettingsScreen(
         }
     }
 
+    /**
+     * Saves a backup when no document picker is going to provide a file.
+     *
+     * Public Downloads first. On Android 11 and later the app's own folder is closed to file
+     * managers and to `adb pull`, so a backup left there on a television cannot be taken off it,
+     * which is the same as not having been written. The app folder stays as the last resort for a
+     * device where even MediaStore refuses.
+     */
+    fun saveBackupWithoutPicker(document: BackupDocument) {
+        pendingBackup = null
+        backupBusy = false
+        scope.launch {
+            val saved = runCatching {
+                withContext(Dispatchers.IO) {
+                    BackupManager.saveToDownloads(context, document)
+                        ?: BackupManager.writeFallback(context, document).absolutePath
+                }
+            }
+            backupFailed = saved.isFailure
+            backupMessage = saved.fold(
+                onSuccess = { where -> "Saved ${document.describe()} to $where" },
+                onFailure = { error -> error.toFailure(AnililiError.BACKUP_FILE_UNWRITABLE).withCode() },
+            )
+        }
+    }
+
     val backupLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.CreateDocument(AppBackup.MIME_TYPE),
     ) { uri ->
         val document = pendingBackup
         pendingBackup = null
         backupBusy = false
-        if (uri == null) return@rememberLauncherForActivityResult
+        if (uri == null) {
+            // Nothing came back: a dismissed picker, or a system that answered in the picker's
+            // place. Either way the snapshot is still in hand, and saving it beats a backup that
+            // silently did not happen.
+            document?.let { saveBackupWithoutPicker(it) }
+            return@rememberLauncherForActivityResult
+        }
         if (document == null) {
             // The screen was rebuilt while the picker was open, taking the snapshot with it. Say
             // so: an empty file, or nothing at all, would read as the backup having worked.
@@ -1099,14 +1131,10 @@ fun SettingsScreen(
                 return@launch
             }
             pendingBackup = document
-            // Android TV builds routinely ship without a document picker, so what fails is the
-            // launch itself rather than the write. Falling back to a folder the app can always
-            // write keeps the feature working on the devices with nowhere else to put a file.
-            //
-            // The device has to be asked before the picker opens: Fire OS catches the missing
-            // activity in the framework and shows its own "no app for this" message, so `launch()`
-            // returns normally and the catch below never ran — the fallback was dead on exactly the
-            // devices it was written for.
+            // Android TV builds routinely ship without a document picker. The device is asked
+            // before one is opened, because a system that answers in the picker's place — Fire OS
+            // shows its own "no app" message rather than failing the launch — would otherwise leave
+            // the catch below unused and the backup unwritten.
             val pickerPresent = BackupManager.canPickDocuments(
                 context,
                 Intent.ACTION_CREATE_DOCUMENT,
@@ -1115,14 +1143,8 @@ fun SettingsScreen(
             if (pickerPresent && runCatching { backupLauncher.launch(AppBackup.fileName()) }.isSuccess) {
                 return@launch
             }
-            pendingBackup = null
-            backupBusy = false
-            runCatching { withContext(Dispatchers.IO) { BackupManager.writeFallback(context, document) } }
-                .onSuccess { file -> backupMessage = "Saved ${document.describe()} to ${file.absolutePath}" }
-                .onFailure { error ->
-                    backupFailed = true
-                    backupMessage = error.toFailure(AnililiError.BACKUP_FILE_UNWRITABLE).withCode()
-                }
+            // No picker: write it somewhere that can actually be reached from a television.
+            saveBackupWithoutPicker(document)
         }
     }
 

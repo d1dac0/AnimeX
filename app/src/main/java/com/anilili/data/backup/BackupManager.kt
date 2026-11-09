@@ -1,9 +1,15 @@
 package com.anilili.data.backup
 
+import android.Manifest
+import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.os.Build
+import android.os.Environment
+import android.provider.MediaStore
 import android.text.format.DateUtils
+import androidx.core.content.ContextCompat
 import com.anilili.BuildConfig
 import com.anilili.data.auth.AccountAdoption
 import com.anilili.data.auth.AuthManager
@@ -26,6 +32,9 @@ import kotlinx.serialization.json.Json
 object BackupManager {
     /** Where a backup goes on a device with no document picker — see [fallbackDirectory]. */
     private const val FALLBACK_DIRECTORY = "Backups"
+
+    /** The folder under public Downloads a picker-less backup is copied into. */
+    private const val DOWNLOADS_FOLDER = "Anilili"
 
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
 
@@ -221,13 +230,84 @@ object BackupManager {
     }
 
     /**
+     * Write [document] into public `Downloads/Anilili`, returning where it went or null if this
+     * device would not take it.
+     *
+     * The app's own folder ([fallbackDirectory]) is not good enough for the device this exists for:
+     * on Android 11 and later `Android/data` is closed to file managers and to `adb pull` for a
+     * normal app, so a backup written there on a television cannot be taken off it — which is the
+     * same as not having been written. Downloads is visible to a file manager, readable over USB,
+     * and survives an uninstall.
+     *
+     * The same route [com.anilili.diagnostics.DiagnosticsExport] uses for reports, for the same
+     * reason; kept separate rather than shared because that one is about a zip of logs and carries
+     * its own permission dance.
+     */
+    fun saveToDownloads(context: Context, document: BackupDocument): String? = runCatching {
+        val name = AppBackup.fileName()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            insertViaMediaStore(context, document, name)
+        } else {
+            writeDownloadsDirectly(context, document, name)
+        }
+    }.getOrElse { error ->
+        DiagnosticsLog.throwable("Backup copy to Downloads failed", error)
+        null
+    }
+
+    /** Q and up: MediaStore owns Downloads, and `IS_PENDING` hides the row until the bytes land. */
+    private fun insertViaMediaStore(context: Context, document: BackupDocument, name: String): String? {
+        val resolver = context.contentResolver
+        val values = ContentValues().apply {
+            put(MediaStore.MediaColumns.DISPLAY_NAME, name)
+            put(MediaStore.MediaColumns.MIME_TYPE, AppBackup.MIME_TYPE)
+            put(MediaStore.MediaColumns.RELATIVE_PATH, "${Environment.DIRECTORY_DOWNLOADS}/$DOWNLOADS_FOLDER")
+            put(MediaStore.MediaColumns.IS_PENDING, 1)
+        }
+        val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values) ?: return null
+        val written = runCatching {
+            resolver.openOutputStream(uri)?.use { stream ->
+                stream.write(AppBackup.encode(document).toByteArray(Charsets.UTF_8))
+            } != null
+        }.getOrDefault(false)
+        if (!written) {
+            resolver.delete(uri, null, null)
+            return null
+        }
+        resolver.update(
+            uri,
+            ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) },
+            null,
+            null,
+        )
+        return "Downloads/$DOWNLOADS_FOLDER/$name"
+    }
+
+    /** Below Q there is no MediaStore row for an arbitrary file, so Downloads needs the grant. */
+    private fun writeDownloadsDirectly(context: Context, document: BackupDocument, name: String): String? {
+        val granted = Build.VERSION.SDK_INT < Build.VERSION_CODES.M ||
+            ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.WRITE_EXTERNAL_STORAGE,
+            ) == PackageManager.PERMISSION_GRANTED
+        if (!granted) return null
+        val directory = File(
+            Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
+            DOWNLOADS_FOLDER,
+        )
+        if (!directory.exists() && !directory.mkdirs()) return null
+        val file = uniqueFile(directory, name)
+        file.writeText(AppBackup.encode(document))
+        return "Downloads/$DOWNLOADS_FOLDER/${file.name}"
+    }
+
+    /**
      * Where backups go when the system has no document picker to ask.
      *
      * Android TV builds routinely ship without DocumentsUI, so `CREATE_DOCUMENT` has nothing to
-     * open and the viewer would be told to pick a folder that cannot be picked. The app's own
-     * external files directory needs no picker and no permission, is readable over adb and by any
-     * file manager the viewer sideloaded, and is the same place the rest of the app's exports can
-     * be found.
+     * open and the viewer would be told to pick a folder that cannot be picked. This folder needs no
+     * picker and no permission, and is the last resort: [saveToDownloads] is tried first because
+     * this one cannot be reached from a television on Android 11 and later.
      */
     fun fallbackDirectory(context: Context): File =
         File(context.getExternalFilesDir(null) ?: context.filesDir, FALLBACK_DIRECTORY)
