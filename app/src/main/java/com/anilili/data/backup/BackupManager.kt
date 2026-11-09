@@ -1,6 +1,8 @@
 package com.anilili.data.backup
 
 import android.content.Context
+import android.content.Intent
+import android.content.pm.PackageManager
 import android.text.format.DateUtils
 import com.anilili.BuildConfig
 import com.anilili.data.auth.AccountAdoption
@@ -193,6 +195,29 @@ object BackupManager {
             applied++
         }
         return AppliedCredentials(applied, warnings)
+    }
+
+    /**
+     * Whether this device has anything that can answer a document picker.
+     *
+     * Android TV builds routinely ship without DocumentsUI — Fire TV among them — and Fire OS does
+     * not let the app find that out by asking: it catches the missing activity in the framework and
+     * shows its own "no app for this" message, so `launch()` returns normally and the caller's
+     * catch-and-fall-back below never runs. Asking the package manager first is the only way to
+     * know before opening a picker that cannot open.
+     *
+     * [openable] mirrors the category the launch contract itself adds: `OpenDocument` asks for
+     * openable content, `CreateDocument` does not.
+     */
+    fun canPickDocuments(
+        context: Context,
+        action: String,
+        mimeType: String,
+        openable: Boolean = false,
+    ): Boolean {
+        val intent = Intent(action).setType(mimeType)
+        if (openable) intent.addCategory(Intent.CATEGORY_OPENABLE)
+        return context.packageManager.resolveActivity(intent, PackageManager.MATCH_DEFAULT_ONLY) != null
     }
 
     /**

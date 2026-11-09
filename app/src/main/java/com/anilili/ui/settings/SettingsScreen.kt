@@ -1102,7 +1102,19 @@ fun SettingsScreen(
             // Android TV builds routinely ship without a document picker, so what fails is the
             // launch itself rather than the write. Falling back to a folder the app can always
             // write keeps the feature working on the devices with nowhere else to put a file.
-            if (runCatching { backupLauncher.launch(AppBackup.fileName()) }.isSuccess) return@launch
+            //
+            // The device has to be asked before the picker opens: Fire OS catches the missing
+            // activity in the framework and shows its own "no app for this" message, so `launch()`
+            // returns normally and the catch below never ran — the fallback was dead on exactly the
+            // devices it was written for.
+            val pickerPresent = BackupManager.canPickDocuments(
+                context,
+                Intent.ACTION_CREATE_DOCUMENT,
+                AppBackup.MIME_TYPE,
+            )
+            if (pickerPresent && runCatching { backupLauncher.launch(AppBackup.fileName()) }.isSuccess) {
+                return@launch
+            }
             pendingBackup = null
             backupBusy = false
             runCatching { withContext(Dispatchers.IO) { BackupManager.writeFallback(context, document) } }
@@ -1140,7 +1152,14 @@ fun SettingsScreen(
         restoreMessage = null
         restoreTone = MidnightNoticeTone.SUCCESS
         val filter = arrayOf(AppBackup.MIME_TYPE, "text/plain", "application/octet-stream", "*/*")
-        if (runCatching { restoreLauncher.launch(filter) }.isSuccess) return
+        // Same missing picker as above, and the same reason for asking first — see backUpSettings.
+        val pickerPresent = BackupManager.canPickDocuments(
+            context,
+            Intent.ACTION_OPEN_DOCUMENT,
+            "*/*",
+            openable = true,
+        )
+        if (pickerPresent && runCatching { restoreLauncher.launch(filter) }.isSuccess) return
         // Same missing picker as above, from the other side: read back whatever the backup row
         // last left in the app's own folder.
         val file = BackupManager.latestFallback(context)
