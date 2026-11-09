@@ -12,9 +12,11 @@ import androidx.lifecycle.viewModelScope
 import com.anilili.data.AppGraph
 import com.anilili.diagnostics.DiagnosticsLog
 import com.anilili.data.library.LibraryStore
+import com.anilili.data.library.NextEpisodeRelease
 import com.anilili.data.library.UPCOMING_AIRING_DAYS
 import com.anilili.data.library.UpcomingAiring
 import com.anilili.data.library.hideFromContinueUntilAired
+import com.anilili.data.library.nextReleasesByTitle
 import com.anilili.data.library.returnsToContinueAt
 import com.anilili.data.model.HomeCollections
 import com.anilili.data.model.Media
@@ -30,6 +32,7 @@ import com.anilili.ui.rethrowIfCancellation
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
@@ -188,6 +191,17 @@ class HomeViewModel : ViewModel() {
             history.filterNot { hideFromContinueUntilAired(it, airing, now) }
         }
     }.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+
+    /**
+     * Each followed title's next episode to air, and when, for the Continue Watching cards.
+     *
+     * Derived from the schedule the row is already filtered by, so a card can say "EP 5 · IN 3 DAYS"
+     * without a request of its own. Recomputed on the same clock the filter judges against, which
+     * moves at midnight and whenever the app is returned to — the two moments "days left" can change.
+     */
+    val nextReleases: StateFlow<Map<Int, NextEpisodeRelease>> =
+        combine(upcoming, clock) { airing, now -> nextReleasesByTitle(airing, now) }
+            .stateIn(viewModelScope, SharingStarted.Eagerly, emptyMap())
 
     /**
      * Read the upcoming schedule, once a day.
