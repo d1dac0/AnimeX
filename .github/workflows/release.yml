@@ -36,6 +36,12 @@ jobs:
           distribution: temurin
           java-version: "17"
 
+      # Pinned, not inherited: the runner image moved to Python 3.14, which has no coincurve wheel,
+      # and building it from source failed before the manifest could be signed.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
       # Not android-actions/setup-android: it installs its default `tools` package, which no longer
       # exists in Google's repository, and fails before Gradle is reached. The runner image already
       # carries an SDK with accepted licences, so this only has to point the build at it; AGP then
