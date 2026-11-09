@@ -42,6 +42,14 @@ jobs:
         with:
           python-version: "3.12"
 
+      # Every run started with an empty Gradle: the wrapper distribution, the dependency graph and
+      # every compiled class fetched or rebuilt from scratch. This restores both the Gradle user
+      # home and the build cache between runs, which is the difference between the first ten-minute
+      # run and the ones after it.
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          cache-read-only: false
+
       # Not android-actions/setup-android: it installs its default `tools` package, which no longer
       # exists in Google's repository, and fails before Gradle is reached. The runner image already
       # carries an SDK with accepted licences, so this only has to point the build at it; AGP then
@@ -77,7 +85,7 @@ jobs:
       - name: Build the TV release
         run: |
           chmod +x gradlew
-          ./gradlew :app:assembleTvRelease --console=plain
+          ./gradlew :app:assembleTvRelease --console=plain --build-cache
 
       - name: Publish the release
         env:
