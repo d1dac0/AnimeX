@@ -1,5 +1,15 @@
 # Working agreements
 
+## Every change starts as an issue
+
+Every piece of work is a GitHub issue in this repository before any code is written — a bug, a
+feature, a build fix, a documentation edit, this rule included. The issue says what is wrong and
+what done looks like; the branch is named after it; the pull request says `Closes #<n>` so merging
+closes it. A change with no issue is a change nobody can find later.
+
+If GitHub Issues is ever disabled on this fork, enable it (`has_issues`) — the rule has no exception
+for small work.
+
 ## Builds: TV only
 
 Always and only build the TV flavour. This checkout ships to Android TV and Fire TV; the mobile
