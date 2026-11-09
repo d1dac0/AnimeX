@@ -122,6 +122,20 @@ class NextEpisodeReleaseTest {
     }
 
     @Test
+    fun `the published schedule wins over the list service where both know a title`() {
+        val scheduled = mapOf(title to NextEpisodeRelease(1177, airsTomorrowAt))
+        val service = mapOf(
+            title to NextEpisodeRelease(1177, airsInThreeDaysAt),
+            999 to NextEpisodeRelease(3, airsInThreeDaysAt),
+        )
+
+        val merged = mergeNextReleases(scheduled, service)
+
+        assertEquals(airsTomorrowAt, merged.getValue(title).airingAt)
+        assertEquals(3, merged.getValue(999).episode)
+    }
+
+    @Test
     fun `the spoken line is a sentence`() {
         assertEquals(
             "Episode 5 releases in 3 days",

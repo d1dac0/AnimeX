@@ -18,13 +18,13 @@ class NostrUpdateEventTest {
 
     private val fixtureJson = """
         {
-          "id": "61ddae93a60885d570184110cf84502678c54d0ea84d319c911abb482dfdd82b",
-          "pubkey": "f1abd1ac685aed1f5145271283cd9418bf13aa92ed26399df191ae0c08b22207",
+          "id": "b3ada8db07c1b20f9fa02cadf4577cf99a4d372e8917fa4740ce1812d3cbb51e",
+          "pubkey": "2b8969c0c4d7947acd4331b89f78a12ff6150831252edb6fa624ddb5c73b0dee",
           "created_at": 1754000000,
           "kind": 30078,
           "tags": [["d", "anilili-update"]],
           "content": "{\"version\":\"0.1.54\",\"changelog\":\"Fixture release for unit tests\",\"apkUrl\":\"https://example.com/Anilili.apk\",\"sizeBytes\":12345}",
-          "sig": "b0e84789a9862b50e814a1e43a4b8bff34ac2bbb9e5ce0faeb8b06076bcdb41ebbb5e306ee86eac01acb653324bde0c325b90268f6130cd83a403655b3fded94"
+          "sig": "4d1759a9e9a2d5720d38b1832e4c5d0e0f7409367b77f9581b19224a420590f2a4438c321d360be669c5db7010deca4d7e22faf9b6ab491144b12f30b84261ba"
         }
     """.trimIndent()
 
@@ -34,7 +34,7 @@ class NostrUpdateEventTest {
     @Test
     fun eventIdMatchesNip01Serialization() {
         assertEquals(
-            "61ddae93a60885d570184110cf84502678c54d0ea84d319c911abb482dfdd82b",
+            "b3ada8db07c1b20f9fa02cadf4577cf99a4d372e8917fa4740ce1812d3cbb51e",
             fixture().computeEventIdHex(),
         )
     }

@@ -11,11 +11,13 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.anilili.data.AppGraph
 import com.anilili.diagnostics.DiagnosticsLog
+import com.anilili.data.library.HistoryEntry
 import com.anilili.data.library.LibraryStore
 import com.anilili.data.library.NextEpisodeRelease
 import com.anilili.data.library.UPCOMING_AIRING_DAYS
 import com.anilili.data.library.UpcomingAiring
 import com.anilili.data.library.hideFromContinueUntilAired
+import com.anilili.data.library.mergeNextReleases
 import com.anilili.data.library.nextReleasesByTitle
 import com.anilili.data.library.returnsToContinueAt
 import com.anilili.data.model.HomeCollections
@@ -36,6 +38,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
@@ -153,6 +156,16 @@ class HomeViewModel : ViewModel() {
     private var upcomingLoadedFor: LocalDate? = null
 
     /**
+     * AniList's next-airing answer for titles the published schedule does not carry.
+     *
+     * The corpus is built for planning and misses some airings entirely, which left those cards with
+     * no countdown while their neighbours had one. Fetched only for titles the corpus lacks, in one
+     * batched request, and kept beside it rather than mixed into it, so the schedule keeps winning
+     * wherever it has an answer.
+     */
+    private val serviceReleases = MutableStateFlow<Map<Int, NextEpisodeRelease>>(emptyMap())
+
+    /**
      * A read already on its way.
      *
      * Starting the app asks twice — once from `init` and once from the foreground observer, which
@@ -200,8 +213,11 @@ class HomeViewModel : ViewModel() {
      * moves at midnight and whenever the app is returned to — the two moments "days left" can change.
      */
     val nextReleases: StateFlow<Map<Int, NextEpisodeRelease>> =
-        combine(upcoming, clock) { airing, now -> nextReleasesByTitle(airing, now) }
-            .stateIn(viewModelScope, SharingStarted.Eagerly, emptyMap())
+        combine(upcoming, clock, serviceReleases) { airing, now, service ->
+            // The published schedule first; the list service only fills the titles it lacks, because
+            // the row's own "step aside" rule reads the schedule and the two must agree.
+            mergeNextReleases(nextReleasesByTitle(airing, now), service)
+        }.stateIn(viewModelScope, SharingStarted.Eagerly, emptyMap())
 
     /**
      * Read the upcoming schedule, once a day.
@@ -268,6 +284,24 @@ class HomeViewModel : ViewModel() {
         load()
         refreshContinueWatching()
         ProcessLifecycleOwner.get().lifecycle.addObserver(foregroundObserver)
+        // The published schedule is built for planning and does not carry every airing, so a title
+        // it misses would draw a card with no countdown at all. Those titles ask AniList, once, when
+        // they first appear on the row — never per render, and never for a title the schedule
+        // already answers.
+        viewModelScope.launch {
+            combine(
+                LibraryStore.history,
+                upcoming,
+            ) { rows, airing -> rows.map(HistoryEntry::anilistId).distinct() to airing }
+                .distinctUntilChanged()
+                .collectLatest { (ids, airing) ->
+                    val answered = nextReleasesByTitle(airing, nowSec()).keys
+                    val unknown = ids.filterNot { it in answered || it in serviceReleases.value }
+                    if (unknown.isEmpty()) return@collectLatest
+                    val found = repo.nextAiringReleases(unknown)
+                    if (found.isNotEmpty()) serviceReleases.value = serviceReleases.value + found
+                }
+        }
         // Wake when the first hidden row's episode becomes watchable, and judge again then. Restarted
         // whenever anything it depends on changes, including its own wake-up, which arms the next.
         viewModelScope.launch {
