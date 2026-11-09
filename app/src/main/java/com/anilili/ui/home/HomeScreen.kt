@@ -115,6 +115,8 @@ import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -133,6 +135,9 @@ import com.anilili.R
 import com.anilili.data.auth.AccountService
 import com.anilili.data.library.HistoryEntry
 import com.anilili.data.library.LibraryStore
+import com.anilili.data.library.NextEpisodeRelease
+import com.anilili.data.library.nextReleaseLabel
+import com.anilili.data.library.spokenNextReleaseLabel
 import com.anilili.data.AppGraph
 import com.anilili.data.model.Media
 import com.anilili.diagnostics.DiagnosticTrigger
@@ -201,6 +206,9 @@ fun HomeScreen(
     // The ViewModel's copy, not the store's: Home is where a title whose next episode is still a day
     // away steps aside, and the two screens that draw this row take it from here.
     val history by vm.continueWatching.collectAsState()
+    // The same schedule the row is filtered by, reduced to each title's next episode: the cards say
+    // how long the wait is without opening the show.
+    val nextReleases by vm.nextReleases.collectAsState()
     val device = LocalAppDeviceProfile.current
     val storedLayout by SettingsStore.homeLayout.collectAsState()
     val layout = remember(storedLayout, device.isTv) { HomeLayout.decode(storedLayout, device.isTv) }
@@ -269,6 +277,7 @@ fun HomeScreen(
                     personal = personal,
                     layout = layout,
                     history = history,
+                    nextReleases = nextReleases,
                     onAnimeClick = onAnimeClick,
                     onResume = onResume,
                     onOpenDetails = onOpenDetails,
@@ -353,6 +362,7 @@ fun HomeScreen(
                     loadingMore = loadingMore,
                     exhausted = exhausted,
                     history = history,
+                    nextReleases = nextReleases,
                     onAnimeClick = onAnimeClick,
                     onResume = onResume,
                     onOpenDetails = onOpenDetails,
@@ -504,6 +514,7 @@ private fun HomeContent(
     loadingMore: Set<HomeSection>,
     exhausted: Set<HomeSection>,
     history: List<HistoryEntry>,
+    nextReleases: Map<Int, NextEpisodeRelease>,
     onAnimeClick: (Int) -> Unit,
     onResume: (HistoryEntry) -> Unit,
     onOpenDetails: (HistoryEntry) -> Unit,
@@ -643,6 +654,7 @@ private fun HomeContent(
                             when (row) {
                                 HomeRow.CONTINUE -> ContinueRail(
                                     history.take(12),
+                                    nextReleases,
                                     onResume,
                                     onOpenDetails,
                                     continueFocusRequester,
@@ -1529,6 +1541,7 @@ internal fun rememberContinueRailState(
 @Composable
 private fun ContinueRail(
     history: List<HistoryEntry>,
+    nextReleases: Map<Int, NextEpisodeRelease>,
     onResume: (HistoryEntry) -> Unit,
     onOpenDetails: (HistoryEntry) -> Unit,
     firstItemFocusRequester: FocusRequester,
@@ -1637,6 +1650,22 @@ private fun ContinueRail(
                     }
                     Text(entry.title, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.labelLarge, modifier = Modifier.padding(top = 6.dp))
                     Text("Episode ${entry.episodeLabel}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    // When the next one lands, on the card rather than only behind the show's own
+                    // page: this row is where the wait is felt. Silent when nothing is scheduled.
+                    nextReleases[entry.anilistId]?.let { release ->
+                        Text(
+                            nextReleaseLabel(release),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier
+                                .padding(top = 1.dp)
+                                // "EP 5 · IN 3 DAYS" is abbreviations at a size this small; what
+                                // the screen reader says is the sentence it stands for.
+                                .clearAndSetSemantics { contentDescription = spokenNextReleaseLabel(release) },
+                        )
+                    }
                 }
             }
         }

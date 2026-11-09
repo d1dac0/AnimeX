@@ -72,6 +72,8 @@ import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
 import androidx.compose.runtime.rememberCoroutineScope
@@ -108,6 +110,9 @@ import com.anilili.R
 import com.anilili.data.DubIndex
 import com.anilili.data.library.HistoryEntry
 import com.anilili.data.library.LibraryStore
+import com.anilili.data.library.NextEpisodeRelease
+import com.anilili.data.library.nextReleaseLabel
+import com.anilili.data.library.spokenNextReleaseLabel
 import com.anilili.data.model.Media
 import com.anilili.data.settings.PosterElement
 import com.anilili.ui.adaptive.TvCardCornerShape
@@ -172,6 +177,7 @@ private const val TV_HERO_BACKDROP_SETTLE_MS = 600L
 internal fun TvHomeContent(
     data: HomeData,
     history: List<HistoryEntry>,
+    nextReleases: Map<Int, NextEpisodeRelease> = emptyMap(),
     personal: PersonalRows = PersonalRows(),
     layout: HomeLayout = HomeLayout.default(isTv = true),
     onAnimeClick: (Int) -> Unit,
@@ -356,6 +362,7 @@ internal fun TvHomeContent(
                     HomeRow.CONTINUE -> item(key = "continue-watching") {
                         TvContinueRail(
                             history = history.take(12),
+                            nextReleases = nextReleases,
                             onResume = onResume,
                             onOpenDetails = onOpenDetails,
                             blockDown = blockDown,
@@ -1046,6 +1053,8 @@ internal fun TvContinueRail(
     onFocusUp: (() -> Boolean)? = null,
     /** Null where the host page heads the rail itself, as My List does with its Expand control. */
     title: String? = "Continue watching",
+    /** Empty off Home: My List and the account sheet keep drawing the row without the countdown. */
+    nextReleases: Map<Int, NextEpisodeRelease> = emptyMap(),
 ) {
     var managedEntry by remember { mutableStateOf<HistoryEntry?>(null) }
     managedEntry?.let { entry ->
@@ -1095,6 +1104,7 @@ internal fun TvContinueRail(
                 itemsIndexed(history, key = { _, item -> item.anilistId }) { index, entry ->
                     TvContinueCard(
                         entry = entry,
+                        nextRelease = nextReleases[entry.anilistId],
                         onClick = { onResume(entry) },
                         onLongClick = { managedEntry = entry },
                         onOpenDetails = { onOpenDetails(entry) },
@@ -1129,6 +1139,7 @@ internal fun TvContinueRail(
 @Composable
 private fun TvContinueCard(
     entry: HistoryEntry,
+    nextRelease: NextEpisodeRelease? = null,
     onClick: () -> Unit,
     onLongClick: () -> Unit,
     onOpenDetails: () -> Unit,
@@ -1245,7 +1256,7 @@ private fun TvContinueCard(
                     fontWeight = FontWeight.Bold,
                     fontSize = 17.sp,
                     lineHeight = 20.sp,
-                    maxLines = if (shownTitle != null) 1 else 2,
+                    maxLines = if (shownTitle != null || nextRelease != null) 1 else 2,
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f, fill = false),
                 )
@@ -1261,6 +1272,23 @@ private fun TvContinueCard(
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.padding(top = 2.dp),
             )
+            // How long until the next episode: the question this row raises and only the show's own
+            // page used to answer. The title gives up a line for it — two lines of title, the
+            // episode line and this one do not fit the card's 118dp.
+            nextRelease?.let { release ->
+                Text(
+                    nextReleaseLabel(release),
+                    color = Color.White.copy(.88f),
+                    fontSize = 11.sp,
+                    lineHeight = 14.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier
+                        .padding(top = 1.dp)
+                        .clearAndSetSemantics { contentDescription = spokenNextReleaseLabel(release) },
+                )
+            }
         }
         TvContinueCardAction(
             icon = Icons.Default.Close,
