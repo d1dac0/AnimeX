@@ -891,13 +891,45 @@ fun SettingsScreen(
         }
     }
 
+    /**
+     * Saves a backup when no document picker is going to provide a file.
+     *
+     * Public Downloads first. On Android 11 and later the app's own folder is closed to file
+     * managers and to `adb pull`, so a backup left there on a television cannot be taken off it,
+     * which is the same as not having been written. The app folder stays as the last resort for a
+     * device where even MediaStore refuses.
+     */
+    fun saveBackupWithoutPicker(document: BackupDocument) {
+        pendingBackup = null
+        backupBusy = false
+        scope.launch {
+            val saved = runCatching {
+                withContext(Dispatchers.IO) {
+                    BackupManager.saveToDownloads(context, document)
+                        ?: BackupManager.writeFallback(context, document).absolutePath
+                }
+            }
+            backupFailed = saved.isFailure
+            backupMessage = saved.fold(
+                onSuccess = { where -> "Saved ${document.describe()} to $where" },
+                onFailure = { error -> error.toFailure(AnililiError.BACKUP_FILE_UNWRITABLE).withCode() },
+            )
+        }
+    }
+
     val backupLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.CreateDocument(AppBackup.MIME_TYPE),
     ) { uri ->
         val document = pendingBackup
         pendingBackup = null
         backupBusy = false
-        if (uri == null) return@rememberLauncherForActivityResult
+        if (uri == null) {
+            // Nothing came back: a dismissed picker, or a system that answered in the picker's
+            // place. Either way the snapshot is still in hand, and saving it beats a backup that
+            // silently did not happen.
+            document?.let { saveBackupWithoutPicker(it) }
+            return@rememberLauncherForActivityResult
+        }
         if (document == null) {
             // The screen was rebuilt while the picker was open, taking the snapshot with it. Say
             // so: an empty file, or nothing at all, would read as the backup having worked.
@@ -1112,18 +1144,16 @@ fun SettingsScreen(
                 return@launch
             }
             pendingBackup = document
-            // Android TV builds routinely ship without a document picker, so what fails is the
-            // launch itself rather than the write. Falling back to a folder the app can always
-            // write keeps the feature working on the devices with nowhere else to put a file.
-            if (runCatching { backupLauncher.launch(AppBackup.fileName()) }.isSuccess) return@launch
-            pendingBackup = null
-            backupBusy = false
-            runCatching { withContext(Dispatchers.IO) { BackupManager.writeFallback(context, document) } }
-                .onSuccess { file -> backupMessage = "Saved ${document.describe()} to ${file.absolutePath}" }
-                .onFailure { error ->
-                    backupFailed = true
-                    backupMessage = error.toFailure(AnililiError.BACKUP_FILE_UNWRITABLE).withCode()
-                }
+            // A television is never offered the picker for a backup. It has no activity that can
+            // create a document — the resolver on this one lists a file explorer that can open a
+            // file and a system stub that does nothing — so asking only produces the system's own
+            // "no app" message, and asking the package manager first is not enough to tell a real
+            // picker from that stub. The file is written straight to Downloads instead, which is
+            // the one place a television can be talked out of.
+            if (!device.isTv && runCatching { backupLauncher.launch(AppBackup.fileName()) }.isSuccess) {
+                return@launch
+            }
+            saveBackupWithoutPicker(document)
         }
     }
 
@@ -1153,7 +1183,14 @@ fun SettingsScreen(
         restoreMessage = null
         restoreTone = MidnightNoticeTone.SUCCESS
         val filter = arrayOf(AppBackup.MIME_TYPE, "text/plain", "application/octet-stream", "*/*")
-        if (runCatching { restoreLauncher.launch(filter) }.isSuccess) return
+        // Same missing picker as above, and the same reason for asking first — see backUpSettings.
+        val pickerPresent = BackupManager.canPickDocuments(
+            context,
+            Intent.ACTION_OPEN_DOCUMENT,
+            "*/*",
+            openable = true,
+        )
+        if (pickerPresent && runCatching { restoreLauncher.launch(filter) }.isSuccess) return
         // Same missing picker as above, from the other side: read back whatever the backup row
         // last left in the app's own folder.
         val file = BackupManager.latestFallback(context)
