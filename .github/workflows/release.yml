@@ -20,13 +20,16 @@ concurrency:
 jobs:
   release:
     runs-on: ubuntu-latest
-    env:
-      # The next version after 0.1.84 (build 96), advanced by the run number so a rebuild is always
-      # newer than what a device already has.
-      VERSION_CODE: ${{ github.run_number + 96 }}
-      VERSION_NAME: 0.1.${{ github.run_number + 84 }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: Work out the version
+        run: |
+          set -euo pipefail
+          # GitHub expressions have no arithmetic, so the numbers are done here and handed on
+          # through GITHUB_ENV. The base is the last version published by hand: 0.1.84, build 96.
+          echo "APP_VERSION_CODE=$((96 + GITHUB_RUN_NUMBER))" >> "$GITHUB_ENV"
+          echo "APP_VERSION_NAME=0.1.$((84 + GITHUB_RUN_NUMBER))" >> "$GITHUB_ENV"
 
       - uses: actions/setup-java@v4
         with:
@@ -64,12 +67,12 @@ jobs:
         run: |
           set -euo pipefail
           OUT=app/build/outputs/apk/tv/release
-          gh release create "v$VERSION_NAME" \
+          gh release create "v$APP_VERSION_NAME" \
             "$OUT/Anilili_tv_armeabi-v7a.apk" \
             "$OUT/Anilili_tv_arm64-v8a.apk" \
             "$OUT/Anilili_tv.apk" \
             --draft \
-            --title "$VERSION_NAME" \
+            --title "$APP_VERSION_NAME" \
             --notes "Built from ${GITHUB_SHA:0:12}. APKs and the signed update manifest are attached."
 
       - name: Sign the update manifest
@@ -80,13 +83,13 @@ jobs:
           python3 -m venv .venv-nostr
           .venv-nostr/bin/pip install --quiet -r scripts/requirements.txt
           OUT=app/build/outputs/apk/tv/release
-          TV_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/v${VERSION_NAME}/Anilili_tv.apk"
+          TV_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/v${APP_VERSION_NAME}/Anilili_tv.apk"
           SIZE=$(stat -c%s "$OUT/Anilili_tv.apk")
           # --dry-run only stops the relay broadcast: the signed event is what gets served from the
           # release as update.json, and it is verified by the app exactly as a relay copy would be.
           .venv-nostr/bin/python scripts/nostr_update.py publish \
-            --version "$VERSION_NAME" \
-            --version-code "$VERSION_CODE" \
+            --version "$APP_VERSION_NAME" \
+            --version-code "$APP_VERSION_CODE" \
             --apk-url "$TV_URL" \
             --size-bytes "$SIZE" \
             --tv-apk-url "$TV_URL" \
@@ -100,8 +103,8 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          gh release upload "v$VERSION_NAME" update.json
-          gh release edit "v$VERSION_NAME" --draft=false
+          gh release upload "v$APP_VERSION_NAME" update.json
+          gh release edit "v$APP_VERSION_NAME" --draft=false
 
       - name: Broadcast the manifest to the relays
         env:
@@ -109,13 +112,13 @@ jobs:
         run: |
           set -euo pipefail
           OUT=app/build/outputs/apk/tv/release
-          TV_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/v${VERSION_NAME}/Anilili_tv.apk"
+          TV_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/v${APP_VERSION_NAME}/Anilili_tv.apk"
           SIZE=$(stat -c%s "$OUT/Anilili_tv.apk")
           # Relays are the durable copy the app falls back to when the release URL is unreachable.
           # A relay refusing the event is normal; the mirror above is already serving it.
           .venv-nostr/bin/python scripts/nostr_update.py publish \
-            --version "$VERSION_NAME" \
-            --version-code "$VERSION_CODE" \
+            --version "$APP_VERSION_NAME" \
+            --version-code "$APP_VERSION_CODE" \
             --apk-url "$TV_URL" \
             --size-bytes "$SIZE" \
             --tv-apk-url "$TV_URL" \
