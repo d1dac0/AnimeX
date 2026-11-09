@@ -217,13 +217,21 @@ listOf("mobile", "tv").forEach { flavor ->
 // copy first, so a case added on the desktop side runs here on the next test run and shows up in
 // `git status` to be committed alongside whatever made it pass. The search walks up from the root
 // because an agent's git worktree (.claude/worktrees/<name>) is not itself next to the sibling.
-val parityCorpus: File? = generateSequence(rootProject.projectDir.parentFile) { it.parentFile }
+val parityCorpusCandidates: List<File> = generateSequence(rootProject.projectDir.parentFile) { it.parentFile }
     .map { File(it, "anilili-desktop/fixtures/parity") }
-    .firstOrNull { it.isDirectory }
+    .toList()
 val syncParityCorpus = tasks.register<Sync>("syncParityCorpus") {
     description = "Refreshes src/test/resources/parity from ../anilili-desktop/fixtures/parity."
-    onlyIf("the desktop checkout is next to this one") { parityCorpus != null }
-    parityCorpus?.let { from(it) }
+    // The candidates are read into a local, and both the predicate and the source list are plain
+    // files. `onlyIf` is stored on the task and serialized into the configuration cache, and a
+    // lambda that read `parityCorpus` directly captured this build script — which cannot be
+    // serialized, so every build failed to store an entry and had to run with
+    // --no-configuration-cache. The check also stays at execution time: resolving the sibling while
+    // the build is configured would let a cache entry outlive a desktop checkout that appears
+    // afterwards, and its fixtures would never be picked up.
+    val candidates = parityCorpusCandidates
+    onlyIf("the desktop checkout is next to this one") { candidates.any(File::isDirectory) }
+    from(candidates)
     into(layout.projectDirectory.dir("src/test/resources/parity"))
 }
 // preBuild rather than the test-resource tasks: everything that reads src/test (resource
