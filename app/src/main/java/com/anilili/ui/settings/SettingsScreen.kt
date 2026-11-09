@@ -1131,19 +1131,15 @@ fun SettingsScreen(
                 return@launch
             }
             pendingBackup = document
-            // Android TV builds routinely ship without a document picker. The device is asked
-            // before one is opened, because a system that answers in the picker's place — Fire OS
-            // shows its own "no app" message rather than failing the launch — would otherwise leave
-            // the catch below unused and the backup unwritten.
-            val pickerPresent = BackupManager.canPickDocuments(
-                context,
-                Intent.ACTION_CREATE_DOCUMENT,
-                AppBackup.MIME_TYPE,
-            )
-            if (pickerPresent && runCatching { backupLauncher.launch(AppBackup.fileName()) }.isSuccess) {
+            // A television is never offered the picker for a backup. It has no activity that can
+            // create a document — the resolver on this one lists a file explorer that can open a
+            // file and a system stub that does nothing — so asking only produces the system's own
+            // "no app" message, and asking the package manager first is not enough to tell a real
+            // picker from that stub. The file is written straight to Downloads instead, which is
+            // the one place a television can be talked out of.
+            if (!device.isTv && runCatching { backupLauncher.launch(AppBackup.fileName()) }.isSuccess) {
                 return@launch
             }
-            // No picker: write it somewhere that can actually be reached from a television.
             saveBackupWithoutPicker(document)
         }
     }
