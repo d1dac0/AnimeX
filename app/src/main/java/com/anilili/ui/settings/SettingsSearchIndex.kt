@@ -116,6 +116,9 @@ internal fun settingsSearchEntries(isTv: Boolean): List<SettingsSearchEntry> = b
                 "family", "avatar", "account")).takeIf { isTv },
             ("Profile lock" to listOf("lock", "pin", "code", "password", "profile", "parental", "private"))
                 .takeIf { isTv },
+            ("Sign in from my phone" to listOf("pair", "pairing", "phone", "sign in", "login",
+                "anilist", "mal", "code", "link", "qrcode", "remote", "type"))
+                .takeIf { isTv },
             "AniList" to listOf("anilist", "account", "login", "sync"),
             "MyAnimeList" to listOf("mal", "myanimelist", "account", "login", "sync"),
             ("Link a TV" to listOf("tv", "television", "pair", "pairing", "link", "connect", "sign in",

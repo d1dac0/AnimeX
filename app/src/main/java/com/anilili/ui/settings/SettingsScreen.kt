@@ -205,6 +205,7 @@ import com.anilili.ui.dialogs.MidnightSettingSpotlight
 import com.anilili.ui.dialogs.MidnightSettingSwitchRow
 import com.anilili.ui.dialogs.MidnightStepperRow
 import com.anilili.ui.pairing.PhonePairingScreen
+import com.anilili.ui.pairing.TvPairingScreen
 import com.anilili.ui.profile.AniListProfile
 import com.anilili.ui.profile.LoginWebView
 import com.anilili.ui.profile.MalImportProgress
@@ -432,6 +433,7 @@ fun SettingsScreen(
     var malImportJob by perScreen.malImportJob
     var loginService by perScreen.loginService
     var tvPairingVisible by perScreen.tvPairingVisible
+    var tvSignInVisible by perScreen.tvSignInVisible
     var diagnosticsMessage by perScreen.diagnosticsMessage
     var diagnosticsBusy by perScreen.diagnosticsBusy
     var diagnosticsDialogVisible by perScreen.diagnosticsDialogVisible
@@ -991,6 +993,17 @@ fun SettingsScreen(
         PhonePairingScreen(
             onFinished = { tvPairingVisible = false },
             onCancel = { tvPairingVisible = false },
+        )
+        return
+    }
+
+    // The other half of that pair: a television signing itself in from a phone. It had only ever
+    // been on My List's sign-in card, and the viewer who skipped the first-run prompt went looking
+    // for it in Settings — the same way the phone side of this was found missing from here.
+    if (tvSignInVisible) {
+        TvPairingScreen(
+            onFinished = { tvSignInVisible = false },
+            onCancel = { tvSignInVisible = false },
         )
         return
     }
@@ -2478,6 +2491,17 @@ fun SettingsScreen(
                                 onClick = com.anilili.ui.profiles.ProfilesUi::showLock,
                             )
                         }
+                    }
+                }
+                // Television only: the way in that does not involve driving a login page with a
+                // remote. A phone reaches the same flow through "Link a TV" below.
+                if (device.isTv) {
+                    item(key = "Sign in from my phone") {
+                        MidnightSettingRow(
+                            title = "Sign in from my phone",
+                            description = "Use the Anilili app on your phone to sign this TV in",
+                            onClick = { tvSignInVisible = true },
+                        )
                     }
                 }
                 item(key = "AniList") {
@@ -4107,6 +4131,7 @@ private class SettingsScreenState {
     val malImportJob = mutableStateOf<Job?>(null)
     val loginService = mutableStateOf<AccountService?>(null)
     val tvPairingVisible = mutableStateOf(false)
+    val tvSignInVisible = mutableStateOf(false)
     val diagnosticsMessage = mutableStateOf<String?>(null)
     val diagnosticsBusy = mutableStateOf(false)
     val diagnosticsDialogVisible = mutableStateOf(false)
