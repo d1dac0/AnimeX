@@ -42,12 +42,24 @@ import okhttp3.WebSocketListener
  * The final guard is unchanged: Android only installs APKs signed by the release key.
  */
 object NostrUpdateSource {
-    const val MANIFEST_PUBKEY_HEX = "f1abd1ac685aed1f5145271283cd9418bf13aa92ed26399df191ae0c08b22207"
+    /**
+     * This fork's update key, not the upstream project's.
+     *
+     * The pubkey is the channel's whole address: only manifests signed by it are accepted, so it has
+     * to belong to whoever publishes the APKs. Rotating it means every installed build stops hearing
+     * updates — the key lives in `nostr-update-key.properties` (gitignored) and in the
+     * `NOSTR_UPDATE_SECRET` repository secret the release workflow signs with.
+     */
+    const val MANIFEST_PUBKEY_HEX = "2b8969c0c4d7947acd4331b89f78a12ff6150831252edb6fa624ddb5c73b0dee"
     const val MANIFEST_KIND = 30078
 
-    /** Where the signed manifest is mirrored as a file; same event, one request instead of a relay scan. */
+    /**
+     * Where the signed manifest is mirrored as a file; same event, one request instead of a relay
+     * scan. `releases/latest/download/` is a stable alias: every release uploads its own
+     * `update.json`, so this URL always serves the newest one without the app knowing a version.
+     */
     const val MANIFEST_MIRROR_URL =
-        "https://huggingface.co/HF_USER/HF_REPO/resolve/main/latest/update.json"
+        "https://github.com/d1dac0/AnimeX/releases/latest/download/update.json"
     const val MANIFEST_D_TAG = "anilili-update"
 
     private val RELAYS = listOf(
