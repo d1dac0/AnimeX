@@ -36,7 +36,17 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - uses: android-actions/setup-android@v3
+      # Not android-actions/setup-android: it installs its default `tools` package, which no longer
+      # exists in Google's repository, and fails before Gradle is reached. The runner image already
+      # carries an SDK with accepted licences, so this only has to point the build at it; AGP then
+      # fetches the platform and build-tools the module pins.
+      - name: Point the build at the runner's Android SDK
+        run: |
+          set -euo pipefail
+          SDK="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          test -d "$SDK" || { echo "No Android SDK at $SDK" >&2; exit 1; }
+          echo "sdk.dir=$SDK" > local.properties
+          echo "Using SDK at $SDK"
 
       - name: Restore the release signing key
         env:
@@ -59,7 +69,9 @@ jobs:
           } > keystore.properties
 
       - name: Build the TV release
-        run: ./gradlew :app:assembleTvRelease --console=plain
+        run: |
+          chmod +x gradlew
+          ./gradlew :app:assembleTvRelease --console=plain
 
       - name: Publish the release
         env:
