@@ -118,6 +118,7 @@ import com.anilili.data.settings.PosterElement
 import com.anilili.ui.adaptive.TvCardCornerShape
 import com.anilili.ui.adaptive.TvPanelCornerShape
 import com.anilili.ui.adaptive.TvSmallCardCornerShape
+import com.anilili.ui.adaptive.TvFocusMemory
 import com.anilili.ui.adaptive.TvFocusTarget
 import com.anilili.ui.adaptive.FocusRingGap
 import com.anilili.ui.adaptive.focusHalo
@@ -766,9 +767,22 @@ private fun TvMediaRail(
     // rather than a misplaced cursor — and swapping a card's target is free, the focus lives on
     // the node.
     val railIdentity = media.firstOrNull()?.id
-    var lastFocusedIndex by remember(railIdentity) { mutableIntStateOf(0) }
+    val railKey = "media:$title:${railIdentity ?: -1}"
+    var lastFocusedIndex by remember(railIdentity) { mutableIntStateOf(TvFocusMemory.indexOf(railKey)) }
     val itemFocusTargets = remember(railIdentity, media.size) { List(media.size) { TvFocusTarget() } }
     val railState = rememberTvRailState()
+
+    // Back from a show returns to the row and the card the viewer opened it from, not to the first
+    // card of the first rail. Consumed once, so a later recomposition does not drag the cursor back.
+    LaunchedEffect(railKey) {
+        val restore = TvFocusMemory.consumeRestore(railKey) ?: return@LaunchedEffect
+        val index = restore.coerceIn(0, media.lastIndex.coerceAtLeast(0))
+        railState.scrollToItem(index)
+        withFrameNanos { }
+        itemFocusTargets.getOrNull(index)
+            ?.takeIf(TvFocusTarget::isAttached)
+            ?.let { runCatching { it.requester.requestFocus() } }
+    }
 
     if (onLoadMore != null) {
         // Asked for while there is still most of a screenful to travel, so the page is usually
@@ -816,6 +830,7 @@ private fun TvMediaRail(
                         onFocused = { focused ->
                             if (focused) {
                                 lastFocusedIndex = index
+                                TvFocusMemory.focused(railKey, index)
                                 onPreview(item)
                             }
                         },
@@ -1066,17 +1081,31 @@ internal fun TvContinueRail(
     }
 
     val historyIds = history.map(HistoryEntry::anilistId)
-    var lastFocusedIndex by remember(historyIds) { mutableIntStateOf(0) }
+    val railKey = "continue:${title ?: "untitled"}"
+    var lastFocusedIndex by remember(historyIds) { mutableIntStateOf(TvFocusMemory.indexOf(railKey)) }
     val itemFocusTargets = remember(historyIds) { List(history.size) { TvFocusTarget() } }
     // Each card's info button: Up from a card goes there before it leaves the rail.
     val actionRequesters = remember(historyIds) { List(history.size) { FocusRequester() } }
     var actionsFocused by remember { mutableStateOf(false) }
+    val railState = rememberContinueRailState(history.firstOrNull()?.anilistId, rememberTvRailState())
+
+    // The player's Back lands here when playback started from this row, so the cursor goes back to
+    // the card it started from — see TvFocusMemory.
+    LaunchedEffect(railKey) {
+        val restore = TvFocusMemory.consumeRestore(railKey) ?: return@LaunchedEffect
+        val index = restore.coerceIn(0, history.lastIndex.coerceAtLeast(0))
+        railState.scrollToItem(index)
+        withFrameNanos { }
+        itemFocusTargets.getOrNull(index)
+            ?.takeIf(TvFocusTarget::isAttached)
+            ?.let { runCatching { it.requester.requestFocus() } }
+    }
 
     TvRailScrollSpec {
         Column {
             if (title != null) TvRailTitle(title)
             LazyRow(
-                state = rememberContinueRailState(history.firstOrNull()?.anilistId, rememberTvRailState()),
+                state = railState,
                 modifier = Modifier
                     .onPreviewKeyEvent { event ->
                         val leavingUpwards = event.type == KeyEventType.KeyDown &&
@@ -1112,7 +1141,12 @@ internal fun TvContinueRail(
                         actionsRequester = actionRequesters[index],
                         cardRequester = itemFocusTargets[index].requester,
                         onActionsFocused = { focused -> actionsFocused = focused },
-                        onFocused = { focused -> if (focused) lastFocusedIndex = index },
+                        onFocused = { focused ->
+                            if (focused) {
+                                lastFocusedIndex = index
+                                TvFocusMemory.focused(railKey, index)
+                            }
+                        },
                         modifier = Modifier
                             .tvFocusTarget(itemFocusTargets[index])
                             .then(
