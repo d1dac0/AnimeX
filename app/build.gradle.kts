@@ -17,8 +17,11 @@ val diagnosticBuildSha = providers.environmentVariable("GITHUB_SHA").orNull
             isIgnoreExitValue = true
         }.standardOutput.asText.get().trim()
     }.getOrDefault("unknown").ifBlank { "unknown" }
-val appVersionCode = 96
-val appVersionName = "0.1.84"
+// CI passes these so a release can be numbered without committing a version bump on every push.
+// The defaults are the last version published by hand.
+val appVersionCode = providers.environmentVariable("APP_VERSION_CODE").orNull?.toIntOrNull() ?: 96
+val appVersionName = providers.environmentVariable("APP_VERSION_NAME").orNull?.takeIf(String::isNotBlank)
+    ?: "0.1.84"
 val openSubtitlesApiKey = providers.gradleProperty("openSubtitlesApiKey").orNull
     ?: providers.environmentVariable("OPEN_SUBTITLES_API_KEY").orNull
     ?: ""
