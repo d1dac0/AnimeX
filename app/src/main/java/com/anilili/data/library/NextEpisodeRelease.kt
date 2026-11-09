@@ -37,6 +37,20 @@ internal fun nextReleasesByTitle(
 }.toMap()
 
 /**
+ * The countdown map Home draws: the published schedule's answer, completed by the list service's
+ * `nextAiringEpisode` for the titles the published corpus does not carry.
+ *
+ * The schedule wins wherever both know a title. It is the same source the row's "step aside until
+ * the next episode" rule reads, so a card's countdown and that decision cannot disagree — and a
+ * corpus that is a day stale would otherwise put one line on the card and the opposite behaviour
+ * behind it.
+ */
+internal fun mergeNextReleases(
+    scheduled: Map<Int, NextEpisodeRelease>,
+    fromService: Map<Int, NextEpisodeRelease>,
+): Map<Int, NextEpisodeRelease> = fromService + scheduled
+
+/**
  * How many days are left, as the card says it: `TODAY`, `TOMORROW`, or `IN 3 DAYS`.
  *
  * Calendar days on the device's own clock, not 24-hour blocks: an episode airing at 01:30 tomorrow
@@ -56,8 +70,7 @@ internal fun releaseDayLabel(
     }
 }
 
-/** `EP 5 · IN 3 DAYS` — the whole line a Continue Watching card adds. */
-internal fun nextReleaseLabel(
+/** `EP 5 · IN 3 DAYS` — the whole line a Continue Watching card adds. */internal fun nextReleaseLabel(
     release: NextEpisodeRelease,
     nowSec: Long = System.currentTimeMillis() / 1000,
     zone: ZoneId = ZoneId.systemDefault(),

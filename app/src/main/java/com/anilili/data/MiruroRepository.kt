@@ -36,6 +36,7 @@ import com.anilili.data.model.MediaListEntry
 import com.anilili.data.model.UserAvatar
 import com.anilili.data.model.Viewer
 import com.anilili.data.model.ViewerStatistics
+import com.anilili.data.library.NextEpisodeRelease
 import com.anilili.data.library.WatchedTitles
 import com.anilili.data.model.WatchedFilter
 import com.anilili.data.remote.AniListClient
@@ -892,6 +893,28 @@ class MiruroRepository(
             ) { aniList.airingSchedule(window.first, window.last + 1) }
         }
         return if (hideAdult) schedules.filterNot { it.media?.isAdult == true } else schedules
+    }
+
+    /**
+     * AniList's own next-airing answer for [ids], keyed by AniList id.
+     *
+     * The fallback for Continue Watching cards the published schedule cannot answer. That corpus is
+     * built for planning and does not carry every airing — a title it missed left its card with no
+     * countdown at all — so the titles it lacks are asked of AniList directly, in one batched
+     * request rather than one per card. Unknown ids and titles with nothing scheduled are simply
+     * absent from the answer.
+     */
+    suspend fun nextAiringReleases(ids: List<Int>): Map<Int, NextEpisodeRelease> {
+        if (ids.isEmpty()) return emptyMap()
+        return runCatching { aniList.mediaByIds(ids) }
+            .onFailure { DiagnosticsLog.throwable("Next airing lookup failed ids=${ids.size}", it) }
+            .getOrDefault(emptyList())
+            .mapNotNull { media ->
+                val episode = media.nextAiringEpisode?.episode ?: return@mapNotNull null
+                val airingAt = media.nextAiringEpisode?.airingAt ?: return@mapNotNull null
+                media.id to NextEpisodeRelease(episode, airingAt)
+            }
+            .toMap()
     }
 
     /**
