@@ -361,8 +361,14 @@ internal fun TvHomeContent(
                 val blockDown = row == lastRail
                 when (row) {
                     HomeRow.CONTINUE -> item(key = "continue-watching") {
+                        // Every title in progress, not the first handful. The row used to be cut at
+                        // twelve here, which is not a row length but a hidden list: a thirteenth
+                        // show was simply absent, and the only way to reach it was to remove
+                        // another one. The rail is a LazyRow, so a card off screen costs nothing
+                        // until the viewer scrolls to it, and the store's own bound (100 entries)
+                        // is the only limit worth having.
                         TvContinueRail(
-                            history = history.take(12),
+                            history = history,
                             nextReleases = nextReleases,
                             onResume = onResume,
                             onOpenDetails = onOpenDetails,

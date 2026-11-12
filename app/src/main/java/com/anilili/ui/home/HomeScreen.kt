@@ -653,7 +653,9 @@ private fun HomeContent(
                         ) {
                             when (row) {
                                 HomeRow.CONTINUE -> ContinueRail(
-                                    history.take(12),
+                                    // Uncapped, as on TV: the row scrolls through everything the
+                                    // viewer is watching instead of stopping at twelve.
+                                    history,
                                     nextReleases,
                                     onResume,
                                     onOpenDetails,
