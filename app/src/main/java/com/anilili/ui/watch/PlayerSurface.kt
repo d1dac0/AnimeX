@@ -13,6 +13,9 @@ import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.annotation.OptIn
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.focusable
@@ -440,6 +443,13 @@ fun PlayerSurface(
     // [applyContentAspectRatio]. 0 means "not known", the same value PlayerView passes on.
     var contentAspectRatio by perController.contentAspectRatio
     var preparedSubtitleSignature by perController.preparedSubtitleSignature
+    // The quality readout, keyed to the stream playing: what the decoder last reported, which of
+    // those reports the viewer has already been shown, and the chip's own text and visibility (kept
+    // apart so the text survives the fade-out instead of blanking halfway through it).
+    var reportedQualityLabel by perSource.reportedQualityLabel
+    var announcedQualityLabel by perSource.announcedQualityLabel
+    var qualityNoticeText by perSource.qualityNoticeText
+    var qualityNoticeVisible by perSource.qualityNoticeVisible
     // Followed as state rather than read off the controller where the settings sheet is composed:
     // `playbackParameters` is a plain getter, so nothing recomposed when it changed and the speed
     // slider sat at its old notch until the sheet was closed and opened again.
@@ -547,6 +557,10 @@ fun PlayerSurface(
             playbackState = activeController.playbackState
             playbackWantsToPlay = activeController.playWhenReady
             contentAspectRatio = activeController.videoSize.contentAspectRatio()
+            // A controller that is already playing when this surface is composed — a return from
+            // picture-in-picture, say — published its size before the listener existed, so seed the
+            // readout from it rather than waiting for a change that may never come.
+            reportedQualityLabel = qualityLabel(activeController.videoSize)
             playbackSpeed = activeController.playbackParameters.speed
             val listener = object : Player.Listener {
                 private var audioPreferenceAppliedFor: String? = null
@@ -557,6 +571,10 @@ fun PlayerSurface(
 
                 override fun onVideoSizeChanged(videoSize: VideoSize) {
                     contentAspectRatio = videoSize.contentAspectRatio()
+                    // The decoder's own size is the only honest answer to "what is playing": the
+                    // ladder carries rungs this stream may never select, and an adaptive stream can
+                    // move between them without anything else in the app noticing.
+                    reportedQualityLabel = qualityLabel(videoSize)
                     DiagnosticsLog.event(
                         "PlayerSurface video size ${videoSize.width}x${videoSize.height} " +
                             "par=${videoSize.pixelWidthHeightRatio} ratio=$contentAspectRatio",
@@ -2281,7 +2299,9 @@ fun PlayerSurface(
                 trackHeights.forEach { height ->
                     add(
                         PlayerQualityOption(
-                            label = "${height}p",
+                            // The same wording as the quality notice, so a 2160 rung is "4K" in
+                            // both places rather than "4K" over the picture and "2160p" in the menu.
+                            label = qualityLabel(height) ?: "${height}p",
                             selected = pinnedVideoHeight == height,
                             onSelect = { changeVideoHeight(activeController, height) },
                             height = height,
@@ -2788,6 +2808,46 @@ fun PlayerSurface(
                     .align(Alignment.TopCenter)
                     .sleepTimerWarningAnchor(isTv = device.isTv),
             )
+        }
+        }
+
+        // The quality readout. It reads the decoder's own size, which is the only thing that answers
+        // "what is playing": the ladder has rungs this stream may never select, and an adaptive
+        // stream moves between them without anything else in the app noticing.
+        //
+        // Two effects rather than one, because the settle and the display answer different
+        // questions. The first waits for a report to hold before accepting it, so a start-up ramp
+        // announces where it landed instead of every rung it crossed. The second owns the chip's
+        // time on screen and is keyed separately so that a report changing while the chip is up
+        // restarts the clock, and a report that turns out to be nothing at all (a player clearing
+        // its size between episodes) does not cancel the timer and leave the chip frozen on screen.
+        CompiledSeparately {
+        LaunchedEffect(reportedQualityLabel) {
+            val label = qualityNoticeLabel(reportedQualityLabel, announcedQualityLabel)
+                ?: return@LaunchedEffect
+            delay(QUALITY_NOTICE_SETTLE_MS)
+            // A newer report restarted this effect; only the one that settles is worth showing.
+            if (reportedQualityLabel != label) return@LaunchedEffect
+            announcedQualityLabel = label
+            qualityNoticeText = label
+            qualityNoticeVisible = true
+        }
+        LaunchedEffect(qualityNoticeText, qualityNoticeVisible) {
+            if (!qualityNoticeVisible) return@LaunchedEffect
+            delay(QUALITY_NOTICE_VISIBLE_MS)
+            qualityNoticeVisible = false
+        }
+        if (!screenLocked && !overlaysHidden) {
+            AnimatedVisibility(
+                visible = qualityNoticeVisible,
+                enter = fadeIn(),
+                exit = fadeOut(),
+                modifier = Modifier
+                    .align(Alignment.CenterStart)
+                    .playerQualityNoticeAnchor(isTv = device.isTv),
+            ) {
+                qualityNoticeText?.let { PlayerQualityNotice(it) }
+            }
         }
         }
 
@@ -3978,7 +4038,7 @@ private class PlayerControllerState() {
     val playbackSpeed = mutableFloatStateOf(1f)
 }
 
-/** The 9 states that resets whenever the stream actually playing changes, including a failover the screen never asked for. */
+/** The 13 states that reset whenever the stream actually playing changes, including a failover the screen never asked for. */
 @Stable
 private class PlayerSourceState() {
     val stallFailoverTriggered = mutableStateOf(false)
@@ -3990,6 +4050,13 @@ private class PlayerSourceState() {
     val dpadSeekVisible = mutableStateOf(false)
     val tvControlsFocusRestoreRequest = mutableIntStateOf(0)
     val pendingSkipTargetMs = mutableStateOf<Long?>(null)
+    /** What the decoder reports now; null until it has a picture to describe. */
+    val reportedQualityLabel = mutableStateOf<String?>(null)
+    /** What the viewer has already been told, so the same height is not announced twice. */
+    val announcedQualityLabel = mutableStateOf<String?>(null)
+    /** The chip's text, kept after it hides so the fade-out has something to fade. */
+    val qualityNoticeText = mutableStateOf<String?>(null)
+    val qualityNoticeVisible = mutableStateOf(false)
 }
 
 /** Which skip windows the playhead is in; see where it is derived for why it is one value. */
