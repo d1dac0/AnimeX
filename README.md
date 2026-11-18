@@ -210,7 +210,7 @@ signed by that Nostr key. Keep backups off this machine.
 | `showcase/tv` | The TV screenshots used in this README |
 | `scripts/nostr_update.py` | Signs and publishes the update manifest |
 | `.github/workflows/release.yml` | Builds, signs, and publishes every merge to `main` |
-| `docs/` | Protocol notes; the marketing page beside them predates this fork |
+| `docs/` | Protocol notes and the static project page |
 
 </details>
 
