@@ -113,6 +113,9 @@ private const val PERSONAL_REFRESH_AFTER_MS = 5L * 60 * 1000
 
 class HomeViewModel : ViewModel() {
     private val repo = AppGraph.repository
+    internal val yearTopRated = YearTopRated(viewModelScope) { year, page, force ->
+        repo.topRatedByYear(year, page, force)
+    }
 
     private val _state = MutableStateFlow<UiState<HomeData>>(UiState.Loading)
     val state = _state.asStateFlow()
@@ -281,6 +284,9 @@ class HomeViewModel : ViewModel() {
     }
 
     init {
+        viewModelScope.launch {
+            SettingsStore.hideAdultContent.drop(1).collect { yearTopRated.refresh() }
+        }
         load()
         refreshContinueWatching()
         ProcessLifecycleOwner.get().lifecycle.addObserver(foregroundObserver)
@@ -465,6 +471,7 @@ class HomeViewModel : ViewModel() {
     fun refresh() {
         load(force = true)
         refreshContinueWatching(force = true)
+        yearTopRated.refresh()
     }
 
     /**

@@ -28,8 +28,8 @@ class TvHomeFocusPolicyTest {
     private val tvDefault = HomeLayout.default(isTv = true)
 
     @Test
-    fun upcomingIsTheBottomBoundaryWhenEveryRailExists() {
-        assertEquals(HomeRow.UPCOMING, tvDefault.present { true }.lastOrNull())
+    fun topScoredByYearIsTheBottomBoundaryWhenEveryRailExists() {
+        assertEquals(HomeRow.TOP_BY_YEAR, tvDefault.present { true }.lastOrNull())
     }
 
     @Test
@@ -51,7 +51,8 @@ class TvHomeFocusPolicyTest {
 
     @Test
     fun boundariesFollowTheViewersOrderAndSkipHiddenRows() {
-        val custom = tvDefault.move(HomeRow.MOVIES, 0).withHidden(HomeRow.UPCOMING, true)
+        val custom = tvDefault.move(HomeRow.MOVIES, 0)
+            .withHidden(HomeRow.UPCOMING, true).withHidden(HomeRow.TOP_BY_YEAR, true)
         val drawn = custom.present { true }
         assertEquals(HomeRow.MOVIES, drawn.first())
         assertEquals(HomeRow.TOP_RATED, drawn.last())

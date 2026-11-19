@@ -122,6 +122,12 @@ data class RecommendedMediaData(@SerialName("Media") val media: RecommendedMedia
 data class GqlRecommendationsResponse(val data: RecommendedMediaData? = null)
 
 @Serializable
+data class MediaScoreCount(val score: Int = 0, val amount: Int = 0)
+
+@Serializable
+data class MediaScoreStats(val scoreDistribution: List<MediaScoreCount> = emptyList())
+
+@Serializable
 data class Media(
     val id: Int,
     val idMal: Int? = null,
@@ -155,6 +161,7 @@ data class Media(
     val trailer: Trailer? = null,
     val relations: MediaRelationConnection = MediaRelationConnection(),
     val streamingEpisodes: List<StreamingEpisode> = emptyList(),
+    val stats: MediaScoreStats? = null,
 ) {
     /**
      * Backdrop for the wide hero banners, best landscape source first.
