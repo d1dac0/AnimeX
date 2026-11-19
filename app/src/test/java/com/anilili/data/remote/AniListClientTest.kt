@@ -75,6 +75,38 @@ class AniListClientTest {
     }
 
     @Test
+    fun `year ranking requires 5000 actual scores and preserves server paging`() = runBlocking {
+        server.enqueue(graphQlBody("""{"data":{"Page":{
+            "pageInfo":{"hasNextPage":true},"media":[
+              {"id":1,"averageScore":99,"popularity":100000,"stats":{"scoreDistribution":[{"score":100,"amount":4999}]}},
+              {"id":2,"averageScore":90,"format":"MOVIE","stats":{"scoreDistribution":[{"score":90,"amount":2500},{"score":100,"amount":2500}]}},
+              {"id":3,"averageScore":89,"format":"OVA","stats":{"scoreDistribution":[{"score":90,"amount":6000}]}},
+              {"id":4,"averageScore":88},
+              {"id":5,"stats":{"scoreDistribution":[{"amount":6000}]}}
+            ]}}}"""))
+        val result = client.topRatedByYear(2025, page = 3, hideAdult = true)
+        assertEquals(listOf(2, 3), result.items.map { it.id })
+        assertTrue(result.hasNextPage)
+        assertEquals(3, result.page)
+        val body = server.takeRequest().body.readUtf8()
+        assertTrue(body.contains("\"year\":2025"))
+        assertTrue(body.contains("\"page\":3"))
+        assertTrue(body.contains("\"isAdult\":false"))
+        assertTrue(body.contains("SCORE_DESC, ID"))
+        assertTrue(body.contains("scoreDistribution"))
+        assertTrue(!body.contains("format:"))
+    }
+
+    @Test
+    fun `a filtered empty ranking page can still have more results`() = runBlocking {
+        server.enqueue(graphQlBody("""{"data":{"Page":{"pageInfo":{"hasNextPage":true},
+            "media":[{"id":1,"averageScore":100,"stats":{"scoreDistribution":[{"amount":2}]}}]}}}"""))
+        val result = client.topRatedByYear(2026)
+        assertTrue(result.items.isEmpty())
+        assertTrue(result.hasNextPage)
+    }
+
+    @Test
     fun `a date falls in AniList's calendar-quarter season`() {
         assertEquals(AiringSeason("WINTER", 2026), AiringSeason.of(java.time.LocalDate.of(2026, 3, 31)))
         assertEquals(AiringSeason("SPRING", 2026), AiringSeason.of(java.time.LocalDate.of(2026, 4, 1)))

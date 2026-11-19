@@ -492,6 +492,32 @@ class AniListClient(
         return queryPage(gql, vars, page)
     }
 
+    /** All formats, ordered by weighted score; list membership is only a safe prefilter. */
+    suspend fun topRatedByYear(year: Int, page: Int = 1, hideAdult: Boolean = false): MediaPage {
+        val gql = """
+            query (${'$'}year: Int, ${'$'}page: Int, ${'$'}isAdult: Boolean) {
+              Page(page: ${'$'}page, perPage: 50) {
+                pageInfo { hasNextPage currentPage }
+                media(type: ANIME, seasonYear: ${'$'}year, sort: [SCORE_DESC, ID],
+                      popularity_greater: 4999, averageScore_greater: 0, isAdult: ${'$'}isAdult) {
+                  $mediaListFields
+                  stats { scoreDistribution { score amount } }
+                }
+              }
+            }
+        """.trimIndent()
+        val vars = buildJsonObject {
+            put("year", year)
+            put("page", page)
+            if (hideAdult) put("isAdult", false)
+        }
+        val result = queryPage(gql, vars, page)
+        return result.copy(items = result.items.filter { media ->
+            (media.averageScore ?: 0) > 0 &&
+                (media.stats?.scoreDistribution?.sumOf { it.amount.toLong() } ?: 0L) >= 5_000
+        })
+    }
+
     /** Episodes airing in the half-open range [startSec, endExclusiveSec), sorted by time. */
     suspend fun airingSchedule(startSec: Long, endExclusiveSec: Long): List<com.anilili.data.model.AiringSchedule> =
         withContext(Dispatchers.IO) {

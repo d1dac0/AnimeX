@@ -14,6 +14,7 @@ enum class HomeRow(val key: String, private val phoneLabel: String, private val 
     TOP_RATED("top_rated", "Top Rated", "Top rated"),
     MOVIES("movies", "Movies"),
     UPCOMING("upcoming", "Upcoming"),
+    TOP_BY_YEAR("top_by_year", "Top scored by year"),
     ;
 
     fun label(isTv: Boolean): String = if (isTv) tvLabel else phoneLabel
@@ -32,7 +33,7 @@ val HomeRow.catalogSection: HomeSection?
         HomeRow.TOP_RATED -> HomeSection.TOP_RATED
         HomeRow.MOVIES -> HomeSection.MOVIES
         HomeRow.UPCOMING -> HomeSection.UPCOMING
-        HomeRow.CONTINUE, HomeRow.FOR_YOU, HomeRow.BECAUSE -> null
+        HomeRow.CONTINUE, HomeRow.FOR_YOU, HomeRow.BECAUSE, HomeRow.TOP_BY_YEAR -> null
     }
 
 /**
@@ -89,7 +90,7 @@ data class HomeLayout(val order: List<HomeRow>, val hidden: Set<HomeRow> = empty
         /** Television leads with Trending, which its spotlight is drawn from. */
         private val TV_DEFAULT = listOf(
             HomeRow.CONTINUE, HomeRow.FOR_YOU, HomeRow.BECAUSE, HomeRow.TRENDING, HomeRow.NEWEST,
-            HomeRow.POPULAR, HomeRow.MOVIES, HomeRow.TOP_RATED, HomeRow.UPCOMING,
+            HomeRow.POPULAR, HomeRow.MOVIES, HomeRow.TOP_RATED, HomeRow.UPCOMING, HomeRow.TOP_BY_YEAR,
         )
 
         fun default(isTv: Boolean): HomeLayout = HomeLayout(if (isTv) TV_DEFAULT else PHONE_DEFAULT)

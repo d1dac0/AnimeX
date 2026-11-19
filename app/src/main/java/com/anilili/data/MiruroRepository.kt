@@ -856,6 +856,11 @@ class MiruroRepository(
     suspend fun topRated(page: Int = 1, force: Boolean = false): MediaPage = mediaPage("top:$page", COLLECTION_TTL, force) {
         aniList.collection("SCORE_DESC", page = page, perPage = 30, hideAdult = hideAdult)
     }
+    suspend fun topRatedByYear(year: Int, page: Int = 1, force: Boolean = false): MediaPage =
+        mediaPage("top-year:5000:$year:$page", COLLECTION_TTL, force) {
+            aniList.topRatedByYear(year, page, hideAdult)
+        }
+
     suspend fun movies(page: Int = 1, force: Boolean = false): MediaPage = mediaPage("movies:$page", COLLECTION_TTL, force) {
         aniList.collection("POPULARITY_DESC", format = "MOVIE", page = page, perPage = 30, hideAdult = hideAdult)
     }

@@ -203,6 +203,7 @@ fun HomeScreen(
     val loadingMore by vm.loadingMore.collectAsState()
     val exhausted by vm.exhausted.collectAsState()
     val personal by vm.personal.collectAsState()
+    val yearTopRated by vm.yearTopRated.state.collectAsState()
     // The ViewModel's copy, not the store's: Home is where a title whose next episode is still a day
     // away steps aside, and the two screens that draw this row take it from here.
     val history by vm.continueWatching.collectAsState()
@@ -274,6 +275,9 @@ fun HomeScreen(
             ) {
                 TvHomeContent(
                     data = s.data,
+                    yearTopRated = yearTopRated,
+                    onSelectYear = vm.yearTopRated::select,
+                    onLoadMoreYear = { vm.yearTopRated.loadMore() },
                     personal = personal,
                     layout = layout,
                     history = history,

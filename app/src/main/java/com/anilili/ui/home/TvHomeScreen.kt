@@ -177,6 +177,9 @@ private const val TV_HERO_BACKDROP_SETTLE_MS = 600L
 @Composable
 internal fun TvHomeContent(
     data: HomeData,
+    yearTopRated: YearTopRatedState = YearTopRatedState(),
+    onSelectYear: (Int) -> Unit = {},
+    onLoadMoreYear: () -> Unit = {},
     history: List<HistoryEntry>,
     nextReleases: Map<Int, NextEpisodeRelease> = emptyMap(),
     personal: PersonalRows = PersonalRows(),
@@ -220,6 +223,7 @@ internal fun TvHomeContent(
             HomeRow.CONTINUE -> history.isNotEmpty()
             HomeRow.FOR_YOU -> personal.forYou.isNotEmpty()
             HomeRow.BECAUSE -> because != null
+            HomeRow.TOP_BY_YEAR -> true
             else -> row.catalogSection?.let { data.section(it).isNotEmpty() } == true
         }
     }
@@ -399,6 +403,18 @@ internal fun TvHomeContent(
                                 onFocusUp = onFocusUp,
                             )
                         }
+                    }
+                    HomeRow.TOP_BY_YEAR -> item(key = row.key) {
+                        LaunchedEffect(Unit) { onSelectYear(yearTopRated.year) }
+                        TvYearTopRatedRail(
+                            state = yearTopRated,
+                            onSelectYear = onSelectYear,
+                            onLoadMore = onLoadMoreYear,
+                            onAnimeClick = onAnimeClick,
+                            onPreview = { railPreview = it },
+                            blockDown = blockDown,
+                            onFocusUp = onFocusUp,
+                        )
                     }
                     else -> {
                         val section = row.catalogSection ?: return@forEach
@@ -756,7 +772,7 @@ private fun TvHeroMetadata(media: Media) {
 }
 
 @Composable
-private fun TvMediaRail(
+internal fun TvMediaRail(
     title: String,
     media: List<Media>,
     onAnimeClick: (Int) -> Unit,
@@ -765,6 +781,7 @@ private fun TvMediaRail(
     isLoadingMore: Boolean = false,
     onLoadMore: (() -> Unit)? = null,
     onFocusUp: (() -> Boolean)? = null,
+    showTitle: Boolean = true,
 ) {
     // Keyed on the head of the list rather than on all of it, because [onLoadMore] appends to the
     // tail while the viewer is somewhere inside: keying on every id would rebuild the remembered
@@ -811,7 +828,7 @@ private fun TvMediaRail(
 
     TvRailScrollSpec {
         Column {
-            TvRailTitle(title)
+            if (showTitle) TvRailTitle(title)
             LazyRow(
                 state = railState,
                 modifier = Modifier

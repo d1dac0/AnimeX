@@ -8,6 +8,16 @@ class HomeLayoutTest {
     private val phone = HomeLayout.default(isTv = false)
 
     @Test
+    fun `existing TV layouts gain the year row at the bottom and can hide it`() {
+        val stored = "movies,continue,for_you,-because,trending,newest,popular,top_rated,upcoming"
+        val upgraded = HomeLayout.decode(stored, isTv = true)
+        assertEquals(HomeRow.TOP_BY_YEAR, upgraded.order.last())
+        assertEquals(HomeRow.MOVIES, upgraded.order.first())
+        val hidden = upgraded.withHidden(HomeRow.TOP_BY_YEAR, true)
+        assertEquals(hidden, HomeLayout.decode(hidden.encode(), isTv = true))
+    }
+
+    @Test
     fun `nothing stored is the device's default`() {
         assertEquals(phone, HomeLayout.decode(null, isTv = false))
         assertEquals(phone, HomeLayout.decode("", isTv = false))
@@ -27,7 +37,7 @@ class HomeLayoutTest {
     fun `unknown keys and repeats are dropped`() {
         val layout = HomeLayout.decode("movies,banana,movies,-continue", isTv = false)
         assertEquals(1, layout.order.count { it == HomeRow.MOVIES })
-        assertEquals(HomeRow.entries.size, layout.order.size)
+        assertEquals(phone.order.size, layout.order.size)
         assertEquals(setOf(HomeRow.CONTINUE), layout.hidden)
     }
 
