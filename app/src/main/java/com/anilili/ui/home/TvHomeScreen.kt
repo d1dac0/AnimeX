@@ -129,6 +129,7 @@ import com.anilili.ui.adaptive.tvFocusTarget
 import com.anilili.ui.components.ContinueWatchingActionsDialog
 import com.anilili.ui.components.DubBadge
 import com.anilili.ui.components.RatingBadge
+import com.anilili.ui.components.LocalPosterElements
 import com.anilili.ui.components.rememberPosterElements
 import com.anilili.ui.components.TvHeroArtwork
 import com.anilili.ui.components.wideHeroArtwork
@@ -467,143 +468,151 @@ internal fun TvHomeContent(
             }
     }
 
+    // #50: one collector for the page. Every card used to call rememberPosterElements itself and
+    // start a collector as it was composed — fifty or more on Home, plus every card the rails
+    // prefetch while scrolling — reading one preference fifty times to get the same answer. The
+    // cards still read it through the helper; provided here, the helper answers from this one
+    // read instead of each card's own collector.
+    val posterElements = rememberPosterElements()
     // Up a rail used to park it flush against the top of the list, which on Home is the top of the
     // screen, under the floating bar: the row the cursor was on lost its upper half. Centring the
     // focused card in the room below the bar puts it in the same place going up as going down.
     TvCentredScrollSpec(topInset = TvTopNavigationHeight) {
-        LazyColumn(
-            state = listState,
-            // Down out of the top bar lands on the list, not on the spotlight inside it. The
-            // spotlight is the first item of a lazy list, so it exists only while it is on screen:
-            // scroll past it and the hand-off has nothing attached to hand to. That is every return
-            // from a title's page, which restores the scroll position Home was left at.
-            //
-            // Ordinary focus search cannot cover for that here, and the reason is geometric. Home
-            // is the one route whose content is deliberately *not* padded below the floating bar,
-            // so that the spotlight can run under it — which puts this list's top edge at y=0,
-            // above the top edge of the focused tab. Compose's 2-D search only considers a
-            // candidate that begins below where the focused item begins, so it rejects the scroll
-            // container and every rail inside it. Down out of the bar has never worked by search on
-            // Home; it has only ever worked by hand-off.
-            //
-            // Naming the list keeps that hand-off pointed at something that exists for as long as
-            // Home has content. Compose's focus-enter then picks whichever child is on screen,
-            // which is the spotlight at the top of the page and the nearest card anywhere else.
-            modifier = modifier
-                .tvFocusTarget(primaryActionFocusTarget)
-                .focusRequester(listFocus)
-                .fillMaxSize(),
-            // The list does not paint the app's canvas itself (#48): the window-level appCanvas
-            // in MainActivity already fills everything behind it, so this one was a second slice
-            // of the same picture drawn on every frame before any content.
-            // With no hero the first rail would sit under the floating bar, and Up from it found
-            // nothing above: the bar, and with it Search and Settings, could not be reached.
-            contentPadding = PaddingValues(top = tvHomeListTopPadding(hasHero = hasHero), bottom = 40.dp),
-            verticalArrangement = Arrangement.spacedBy(20.dp),
-        ) {
-            if (hasHero) {
-                item(key = "tv-hero", contentType = "hero") {
-                    // #47: railPreview is read here, inside the hero's own item, and nowhere
-                    // else in the page's body — a settled preview now recomposes only this item,
-                    // where before it re-ran TvHomeContent and rebuilt every rail's content
-                    // lambda with it. hasHero has already said the spotlight slide exists, so
-                    // the elvis only answers for the compiler.
-                    val hero = tvHomeHero(spotlightHero, railPreview) ?: return@item
-                    TvHero(
-                        media = hero,
-                        backdrop = hero.wideHeroArtwork() ?: heroBackdrops[hero.id],
-                        logo = heroLogos[hero.id],
-                        pageIndex = spotlightIndex,
-                        pageCount = spotlight.size,
-                        onAnimeClick = onAnimeClick,
-                        onSlide = { step ->
-                            // Wraps both ways, so holding one direction walks the spotlight round
-                            // rather than stopping dead at either end.
-                            spotlightIndex = slideHeroPage(spotlightIndex, spotlight.size, step)
-                        },
-                        onFocusChanged = { heroHasFocus = it },
-                        actionFocusRequester = heroActionFocus,
-                    )
-                }
-            }
-            rails.forEach { row ->
-                // Up from the top rail belongs to the hero; from any other, to the rail above. With
-                // no hero, Up from the top rail is left to the focus search, which finds the bar.
-                val onFocusUp = returnToHero.takeIf { row == firstRail && hasHero }
-                val blockDown = row == lastRail
-                when (row) {
-                    HomeRow.CONTINUE -> item(key = "continue-watching", contentType = "continue") {
-                        // Every title in progress, not the first handful. The row used to be cut at
-                        // twelve here, which is not a row length but a hidden list: a thirteenth
-                        // show was simply absent, and the only way to reach it was to remove
-                        // another one. The rail is a LazyRow, so a card off screen costs nothing
-                        // until the viewer scrolls to it, and the store's own bound (100 entries)
-                        // is the only limit worth having.
-                        Box(
-                            Modifier.onFocusChanged { state ->
-                                if (state.hasFocus || !latestHistoryEmpty) continueHeldFocus = state.hasFocus
-                            },
-                        ) {
-                            TvContinueRail(
-                                history = history,
-                                nextReleases = nextReleases,
-                                onResume = onResume,
-                                onOpenDetails = onOpenDetails,
-                                blockDown = blockDown,
-                                focusKey = "home",
-                                onFocusUp = onFocusUp,
-                            )
-                        }
-                    }
-                    HomeRow.FOR_YOU -> item(key = "for-you", contentType = "media-rail") {
-                        Box(Modifier.tourTarget(TourTarget.FOR_YOU)) {
-                            TvMediaRail(
-                                title = row.label(isTv = true),
-                                media = personal.forYou,
-                                onAnimeClick = onAnimeClick,
-                                onPreview = previewRail,
-                                blockDown = blockDown,
-                                onFocusUp = onFocusUp,
-                            )
-                        }
-                    }
-                    HomeRow.BECAUSE -> item(key = "because-${because?.seed?.id}", contentType = "media-rail") {
-                        Box(Modifier.tourTarget(TourTarget.BECAUSE)) {
-                            TvMediaRail(
-                                title = "Because you watched ${because?.seed?.title?.preferred}",
-                                media = because?.items.orEmpty(),
-                                onAnimeClick = onAnimeClick,
-                                onPreview = previewRail,
-                                blockDown = blockDown,
-                                onFocusUp = onFocusUp,
-                            )
-                        }
-                    }
-                    HomeRow.TOP_BY_YEAR -> item(key = row.key, contentType = "year-rail") {
-                        LaunchedEffect(Unit) { onSelectYear(yearTopRated.year) }
-                        TvYearTopRatedRail(
-                            state = yearTopRated,
-                            onSelectYear = onSelectYear,
-                            onLoadMore = onLoadMoreYear,
+        CompositionLocalProvider(LocalPosterElements provides posterElements) {
+            LazyColumn(
+                state = listState,
+                // Down out of the top bar lands on the list, not on the spotlight inside it. The
+                // spotlight is the first item of a lazy list, so it exists only while it is on screen:
+                // scroll past it and the hand-off has nothing attached to hand to. That is every return
+                // from a title's page, which restores the scroll position Home was left at.
+                //
+                // Ordinary focus search cannot cover for that here, and the reason is geometric. Home
+                // is the one route whose content is deliberately *not* padded below the floating bar,
+                // so that the spotlight can run under it — which puts this list's top edge at y=0,
+                // above the top edge of the focused tab. Compose's 2-D search only considers a
+                // candidate that begins below where the focused item begins, so it rejects the scroll
+                // container and every rail inside it. Down out of the bar has never worked by search on
+                // Home; it has only ever worked by hand-off.
+                //
+                // Naming the list keeps that hand-off pointed at something that exists for as long as
+                // Home has content. Compose's focus-enter then picks whichever child is on screen,
+                // which is the spotlight at the top of the page and the nearest card anywhere else.
+                modifier = modifier
+                    .tvFocusTarget(primaryActionFocusTarget)
+                    .focusRequester(listFocus)
+                    .fillMaxSize(),
+                // The list does not paint the app's canvas itself (#48): the window-level appCanvas
+                // in MainActivity already fills everything behind it, so this one was a second slice
+                // of the same picture drawn on every frame before any content.
+                // With no hero the first rail would sit under the floating bar, and Up from it found
+                // nothing above: the bar, and with it Search and Settings, could not be reached.
+                contentPadding = PaddingValues(top = tvHomeListTopPadding(hasHero = hasHero), bottom = 40.dp),
+                verticalArrangement = Arrangement.spacedBy(20.dp),
+            ) {
+                if (hasHero) {
+                    item(key = "tv-hero", contentType = "hero") {
+                        // #47: railPreview is read here, inside the hero's own item, and nowhere
+                        // else in the page's body — a settled preview now recomposes only this item,
+                        // where before it re-ran TvHomeContent and rebuilt every rail's content
+                        // lambda with it. hasHero has already said the spotlight slide exists, so
+                        // the elvis only answers for the compiler.
+                        val hero = tvHomeHero(spotlightHero, railPreview) ?: return@item
+                        TvHero(
+                            media = hero,
+                            backdrop = hero.wideHeroArtwork() ?: heroBackdrops[hero.id],
+                            logo = heroLogos[hero.id],
+                            pageIndex = spotlightIndex,
+                            pageCount = spotlight.size,
                             onAnimeClick = onAnimeClick,
-                            onPreview = previewRail,
-                            blockDown = blockDown,
-                            onFocusUp = onFocusUp,
+                            onSlide = { step ->
+                                // Wraps both ways, so holding one direction walks the spotlight round
+                                // rather than stopping dead at either end.
+                                spotlightIndex = slideHeroPage(spotlightIndex, spotlight.size, step)
+                            },
+                            onFocusChanged = { heroHasFocus = it },
+                            actionFocusRequester = heroActionFocus,
                         )
                     }
-                    else -> {
-                        val section = row.catalogSection ?: return@forEach
-                        item(key = row.key, contentType = "media-rail") {
-                            TvMediaRail(
-                                title = row.label(isTv = true),
-                                media = data.section(section),
+                }
+                rails.forEach { row ->
+                    // Up from the top rail belongs to the hero; from any other, to the rail above. With
+                    // no hero, Up from the top rail is left to the focus search, which finds the bar.
+                    val onFocusUp = returnToHero.takeIf { row == firstRail && hasHero }
+                    val blockDown = row == lastRail
+                    when (row) {
+                        HomeRow.CONTINUE -> item(key = "continue-watching", contentType = "continue") {
+                            // Every title in progress, not the first handful. The row used to be cut at
+                            // twelve here, which is not a row length but a hidden list: a thirteenth
+                            // show was simply absent, and the only way to reach it was to remove
+                            // another one. The rail is a LazyRow, so a card off screen costs nothing
+                            // until the viewer scrolls to it, and the store's own bound (100 entries)
+                            // is the only limit worth having.
+                            Box(
+                                Modifier.onFocusChanged { state ->
+                                    if (state.hasFocus || !latestHistoryEmpty) continueHeldFocus = state.hasFocus
+                                },
+                            ) {
+                                TvContinueRail(
+                                    history = history,
+                                    nextReleases = nextReleases,
+                                    onResume = onResume,
+                                    onOpenDetails = onOpenDetails,
+                                    blockDown = blockDown,
+                                    focusKey = "home",
+                                    onFocusUp = onFocusUp,
+                                )
+                            }
+                        }
+                        HomeRow.FOR_YOU -> item(key = "for-you", contentType = "media-rail") {
+                            Box(Modifier.tourTarget(TourTarget.FOR_YOU)) {
+                                TvMediaRail(
+                                    title = row.label(isTv = true),
+                                    media = personal.forYou,
+                                    onAnimeClick = onAnimeClick,
+                                    onPreview = previewRail,
+                                    blockDown = blockDown,
+                                    onFocusUp = onFocusUp,
+                                )
+                            }
+                        }
+                        HomeRow.BECAUSE -> item(key = "because-${because?.seed?.id}", contentType = "media-rail") {
+                            Box(Modifier.tourTarget(TourTarget.BECAUSE)) {
+                                TvMediaRail(
+                                    title = "Because you watched ${because?.seed?.title?.preferred}",
+                                    media = because?.items.orEmpty(),
+                                    onAnimeClick = onAnimeClick,
+                                    onPreview = previewRail,
+                                    blockDown = blockDown,
+                                    onFocusUp = onFocusUp,
+                                )
+                            }
+                        }
+                        HomeRow.TOP_BY_YEAR -> item(key = row.key, contentType = "year-rail") {
+                            LaunchedEffect(Unit) { onSelectYear(yearTopRated.year) }
+                            TvYearTopRatedRail(
+                                state = yearTopRated,
+                                onSelectYear = onSelectYear,
+                                onLoadMore = onLoadMoreYear,
                                 onAnimeClick = onAnimeClick,
                                 onPreview = previewRail,
                                 blockDown = blockDown,
-                                isLoadingMore = section in loadingMore,
-                                onLoadMore = { onLoadMore(section) },
                                 onFocusUp = onFocusUp,
                             )
+                        }
+                        else -> {
+                            val section = row.catalogSection ?: return@forEach
+                            item(key = row.key, contentType = "media-rail") {
+                                TvMediaRail(
+                                    title = row.label(isTv = true),
+                                    media = data.section(section),
+                                    onAnimeClick = onAnimeClick,
+                                    onPreview = previewRail,
+                                    blockDown = blockDown,
+                                    isLoadingMore = section in loadingMore,
+                                    onLoadMore = { onLoadMore(section) },
+                                    onFocusUp = onFocusUp,
+                                )
+                            }
                         }
                     }
                 }
