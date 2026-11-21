@@ -85,6 +85,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.media3.common.C
 import androidx.media3.common.ForwardingPlayer
 import androidx.media3.common.MediaItem
@@ -145,6 +147,7 @@ import com.anilili.playback.launchExternalPlayer
 import com.anilili.playback.ExternalPlaybackSession
 import com.anilili.playback.loadSubtitleCueTimes
 import com.anilili.playback.nearestSubtitleCues
+import com.anilili.playback.playerPreparesWhenIdle
 import com.anilili.playback.signsMergeDialogueLabel
 import com.anilili.playback.signsPairing
 import com.anilili.playback.subtitleDelaySeed
@@ -533,6 +536,39 @@ fun PlayerSurface(
             ContextCompat.getMainExecutor(context),
         )
         onDispose { MediaController.releaseFuture(controllerFuture) }
+    }
+
+    // The screensaver and Home stop the activity while this surface is composed, and the stop
+    // parks the player (#61) — pause, then stop, leaving it STATE_IDLE still holding its item.
+    // Nothing else revives that: the prepare effect's keys are unchanged by the round trip, so it
+    // never re-runs, and the viewer woke to the loading screen — the parked item reporting no
+    // picture — with every button dead. ON_START is the app coming back into view: prepare brings
+    // the picture back, and whether it plays is the pause intent the park recorded — paused when
+    // the viewer had paused it, playing when the park interrupted playback that was running.
+    val lifecycleOwner = context.findLifecycleOwner()
+    DisposableEffect(lifecycleOwner) {
+        val owner = lifecycleOwner
+        if (owner == null) {
+            onDispose { }
+        } else {
+            val observer = LifecycleEventObserver { _, event ->
+                if (event != Lifecycle.Event.ON_START) return@LifecycleEventObserver
+                val activeController = controller ?: return@LifecycleEventObserver
+                if (!playerPreparesWhenIdle(
+                        activeController.playbackState,
+                        activeController.currentMediaItem != null,
+                    )
+                ) {
+                    return@LifecycleEventObserver
+                }
+                val resume = PlaybackService.consumeInvoluntaryPause()
+                DiagnosticsLog.event("PlayerSurface revived the parked player on start resume=$resume")
+                activeController.prepare()
+                activeController.playWhenReady = resume
+            }
+            owner.lifecycle.addObserver(observer)
+            onDispose { owner.lifecycle.removeObserver(observer) }
+        }
     }
 
     LaunchedEffect(controller) {
@@ -3118,7 +3154,7 @@ private fun togglePlayerPlayback(controller: MediaController): Boolean {
         if (controller.playbackState == Player.STATE_ENDED) controller.seekToDefaultPosition()
         // A parked player (#61) is idle but still holds its item; prepare() revives it where it
         // stopped. play() alone does nothing from idle — without this, Play after Home was dead.
-        if (playerTogglePreparesWhenIdle(controller.playbackState, controller.currentMediaItem != null)) {
+        if (playerPreparesWhenIdle(controller.playbackState, controller.currentMediaItem != null)) {
             controller.prepare()
         }
         controller.play()
@@ -3138,17 +3174,6 @@ private fun togglePlayerPlayback(controller: MediaController): Boolean {
  */
 internal fun playerToggleWillPlay(playWhenReady: Boolean, playbackState: Int = Player.STATE_READY): Boolean =
     playbackState == Player.STATE_ENDED || !playWhenReady
-
-/**
- * Whether pressing play on an idle player needs prepare() before play() (#61).
- *
- * A parked player — television exits pause, then stop ([com.anilili.playback.shouldParkPlaybackOnExit]) —
- * sits in STATE_IDLE still holding its item, and `play()` alone does nothing from idle. An idle
- * player with nothing held must not prepare: there is nothing to revive, and the queue it would
- * build belongs to the next setMediaItem.
- */
-internal fun playerTogglePreparesWhenIdle(playbackState: Int, hasMediaItem: Boolean): Boolean =
-    playbackState == Player.STATE_IDLE && hasMediaItem
 
 /** Whether the player is drawing a frame the viewer can see — see the effect that reports it. */
 internal fun playerShowsPicture(playbackState: Int): Boolean =
