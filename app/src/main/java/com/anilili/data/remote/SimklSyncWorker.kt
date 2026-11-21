@@ -16,6 +16,8 @@ import com.anilili.diagnostics.DiagnosticsLog
 import com.anilili.ui.rethrowIfCancellation
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 /**
  * What the Simkl tracker is told, and the one place that decides whether it is told anything.
@@ -184,9 +186,16 @@ class SimklSyncWorker(
             )
         }
 
-        /** Drops every queued update; used when the person signed in is about to change. */
-        fun cancelAll(context: Context) {
-            WorkManager.getInstance(context.applicationContext).cancelAllWorkByTag(TAG).result.get()
+        /**
+         * Drops every queued update; used when the person signed in is about to change.
+         *
+         * The wait runs on IO: `result.get()` is unbounded while WorkManager's serial executor is
+         * busy (pruneWork, an export), and the Settings disconnect row calls this from Main.
+         */
+        suspend fun cancelAll(context: Context) {
+            withContext(Dispatchers.IO) {
+                WorkManager.getInstance(context.applicationContext).cancelAllWorkByTag(TAG).result.get()
+            }
         }
     }
 }

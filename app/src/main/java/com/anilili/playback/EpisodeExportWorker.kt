@@ -45,9 +45,11 @@ class EpisodeExportWorker(
         // they share one. A device report caught both dying together: OutOfMemoryError on
         // ExoPlayer:Playback and on Transformer:Internal in the same second, at a 256 MB ceiling,
         // on a current flagship. Exports are background convenience work with no deadline, so
-        // they yield to playback rather than compete with it.
-        if (PlaybackStatus.isPlaying.value) {
-            DiagnosticsLog.event("Episode export deferred while playing id=$id")
+        // they yield to playback rather than compete with it. "Playback" is the whole session —
+        // paused, buffering, an embed or an external hand-off included — plus a quiet window
+        // after it, not Media3's isPlaying, which is false through every pause and rebuffer.
+        if (!PlaybackStatus.quietForBackgroundWork()) {
+            DiagnosticsLog.event("Episode export deferred while a playback session is open id=$id")
             return Result.retry()
         }
         // Likewise for a download queue that is still running: the next episode's segments being
@@ -85,7 +87,12 @@ class EpisodeExportWorker(
             }
             // A failure is already recorded in the export status and surfaced in the library, so
             // the work itself is done either way; retrying a codec or storage failure would loop.
-            if (outcome.isSuccess) Result.success() else Result.failure()
+            // An export that stood aside for playback is not a failure: it goes round again.
+            when {
+                outcome.isSuccess -> Result.success()
+                outcome.exceptionOrNull() is ExportYieldedToPlayback -> Result.retry()
+                else -> Result.failure()
+            }
         } finally {
             EpisodeExport.releaseExportSlot()
         }

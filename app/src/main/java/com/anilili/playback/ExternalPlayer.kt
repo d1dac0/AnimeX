@@ -274,6 +274,7 @@ internal fun launchExternalPlayer(
     session: ExternalPlaybackSession? = null,
 ): Boolean {
     return runCatching {
+        LocalStreamProxy.beginHandOff()
         val intent = externalPlayerIntent(context, request, forResult = session != null)
         val chosen = preferredPackage.takeIf(String::isNotBlank)
             ?.takeIf { canReceiveExternalPlayback(context, intent, it) }
@@ -285,6 +286,7 @@ internal fun launchExternalPlayer(
         )
         val forResult = session != null && ExternalPlaybackReturns.launch(intent, session)
         if (!forResult) context.startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        PlaybackStatus.externalHandOffStarted()
         true
     }.getOrElse { error ->
         val failure = if (error is ActivityNotFoundException) {

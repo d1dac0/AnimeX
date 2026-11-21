@@ -45,6 +45,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -61,6 +62,38 @@ object PlaybackStatus {
     internal fun update(playing: Boolean) {
         _isPlaying.value = playing
     }
+
+    private val session = PlaybackSessionTracker { android.os.SystemClock.elapsedRealtime() }
+
+    /**
+     * True from prepare until stop/release in [PlaybackService], while an embed player is mounted,
+     * and while an external hand-off is live — unlike [isPlaying], it stays true through a pause or
+     * a rebuffer. Background work that must not compete with playback (exports) reads this.
+     */
+    val sessionActive: StateFlow<Boolean> = session.active
+
+    /** How long background work should still wait after playback; null while a session is open. */
+    internal fun quietRemainingMs(): Long? = session.quietRemainingMs(SESSION_QUIET_MS)
+
+    /** Whether background work may start now: no session open, and none for [SESSION_QUIET_MS]. */
+    internal fun quietForBackgroundWork(): Boolean = quietRemainingMs() == 0L
+
+    internal fun nativeSessionChanged(active: Boolean) = session.setNative(active)
+
+    /** Called while a WebView embed player is mounted; pair with [embedUnmounted]. */
+    fun embedMounted() = session.embedMounted()
+
+    fun embedUnmounted() = session.embedUnmounted()
+
+    internal fun externalHandOffStarted() {
+        ExternalHandOffLifetime.started()
+        session.setExternal(true)
+    }
+
+    internal fun externalHandOffEnded() = session.setExternal(false)
+
+    /** Long enough to cover a pause, a rebuffer's re-prepare and the step to the next episode. */
+    internal const val SESSION_QUIET_MS = 30_000L
 }
 
 /**
@@ -481,9 +514,23 @@ class PlaybackService : MediaSessionService() {
                         if (isPlaying) allowMediaButtonResume()
                     }
 
+                    private var lastPlaybackState = Player.STATE_IDLE
+
                     override fun onPlaybackStateChanged(playbackState: Int) {
                         DiagnosticsLog.event("PlaybackService player state=${playbackState.stateName()}")
+                        val preparedFromIdle =
+                            lastPlaybackState == Player.STATE_IDLE && playbackState != Player.STATE_IDLE
+                        lastPlaybackState = playbackState
                         if (activePlayer !== source) return
+                        // A session runs from prepare to stop: IDLE is the only state without one.
+                        // ENDED still holds the item, and the next episode is moments away.
+                        PlaybackStatus.nativeSessionChanged(playbackState != Player.STATE_IDLE)
+                        // Preparing an item here means the viewer is watching in this app again, so
+                        // a proxy kept up for an earlier external hand-off has nothing left to serve.
+                        if (preparedFromIdle) {
+                            PlaybackStatus.externalHandOffEnded()
+                            LocalStreamProxy.stop("native playback prepared")
+                        }
                         if (playbackState == Player.STATE_READY && source === castRoute?.player) {
                             remoteRouteEverReady = true
                         }
@@ -875,6 +922,7 @@ class PlaybackService : MediaSessionService() {
         activePlayer = null
         episodeNavigator = null
         PlaybackStatus.update(false)
+        PlaybackStatus.nativeSessionChanged(false)
         if (::session.isInitialized) session.release()
         castRoute?.release()
         if (::player.isInitialized) {

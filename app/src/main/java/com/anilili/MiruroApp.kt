@@ -151,8 +151,14 @@ class MiruroApp : Application(), ImageLoaderFactory {
         diagnosticsStep("AutomaticReleaseManager.init") { AutomaticReleaseManager.init(this) }
         diagnosticsStep("AniListNotificationPushManager.init") { AniListNotificationPushManager.init(this) }
         diagnosticsStep("ReleaseSyncScheduler.schedule") { ReleaseSyncScheduler.schedule(this) }
-        // After SettingsStore, whose switch decides whether the poll is scheduled at all.
-        diagnosticsStep("AiringPollScheduler.sync") { AiringPollScheduler.sync(this) }
+        // After SettingsStore has *loaded*, not merely started: its switch decides whether the poll
+        // is scheduled at all, and until the DataStore read lands it reads as the default "on",
+        // which re-enqueued the poll on every process start for a viewer who had turned it off.
+        startupScope.launch {
+            SettingsStore.awaitLoaded()
+            runCatching { AiringPollScheduler.sync(this@MiruroApp) }
+                .onFailure { DiagnosticsLog.throwable("AiringPollScheduler.sync failed", it) }
+        }
         // After SettingsStore, whose switch the check consults before it fetches anything.
         diagnosticsStep("AnnouncementManager.init") { AnnouncementManager.init(this) }
         diagnosticsStep("AnnouncementScheduler.schedule") { AnnouncementScheduler.schedule(this) }

@@ -16,6 +16,8 @@ import com.anilili.data.library.LibraryStore
 import com.anilili.diagnostics.DiagnosticsLog
 import com.anilili.ui.rethrowIfCancellation
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import java.util.concurrent.TimeUnit
 
 /**
@@ -199,9 +201,16 @@ class ListProgressSyncWorker(
             )
         }
 
-        /** Drops every queued push; used when the person signed in is about to change. */
-        fun cancelAll(context: Context) {
-            WorkManager.getInstance(context.applicationContext).cancelAllWorkByTag(TAG).result.get()
+        /**
+         * Drops every queued push; used when the person signed in is about to change.
+         *
+         * Suspends and waits on IO: `result.get()` is unbounded while WorkManager's serial executor
+         * is busy, so it must never be reachable from Main.
+         */
+        suspend fun cancelAll(context: Context) {
+            withContext(Dispatchers.IO) {
+                WorkManager.getInstance(context.applicationContext).cancelAllWorkByTag(TAG).result.get()
+            }
             DiagnosticsLog.event("List progress work cancelled for a profile switch")
         }
 

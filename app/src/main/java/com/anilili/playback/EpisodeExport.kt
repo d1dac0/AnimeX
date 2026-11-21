@@ -45,6 +45,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
@@ -108,6 +109,9 @@ data class ExportedEpisode(
     val exportedAtMs: Long = 0,
     val subtitles: List<ExportedSubtitle> = emptyList(),
 )
+
+/** An export stopped because a playback session opened; it is retried, never reported. */
+internal class ExportYieldedToPlayback : Exception("Export stopped for playback")
 
 /**
  * Turns a completed HLS download into a single MP4 in the device's public Downloads folder.
@@ -197,16 +201,23 @@ object EpisodeExport {
             // running, keeps its place in WorkManager's backoff, which grows with every attempt —
             // so by the time the deferral ended, the next try could be an hour away. Re-arming
             // them the moment both are over replaces that wait with a fresh attempt.
+            //
+            // "Over" for playback is the session closing and staying closed for a quiet window,
+            // not isPlaying turning false: that happens on every pause, rebuffer and episode start,
+            // and each one used to launch a transmux that then ran on through resumed playback.
+            // collectLatest drops the wait the moment a session reopens.
             playbackWatcher = scope.launch {
                 combine(
-                    PlaybackStatus.isPlaying,
+                    PlaybackStatus.sessionActive,
                     EpisodeDownloads.downloads(app).map(::queueActive).distinctUntilChanged(),
-                ) { playing, downloading -> playing || downloading }
+                ) { session, downloading -> session || downloading }
                     .distinctUntilChanged()
-                    .collect { busy ->
-                        if (busy) return@collect
+                    .collectLatest { busy ->
+                        if (busy) return@collectLatest
+                        val quietWaitMs = PlaybackStatus.quietRemainingMs() ?: return@collectLatest
+                        delay(quietWaitMs)
                         val pending = pendingIds(app)
-                        if (pending.isEmpty()) return@collect
+                        if (pending.isEmpty()) return@collectLatest
                         EpisodeDownloads.downloads(app).value
                             .asSequence()
                             .filter { it.isComplete && it.id in pending }
@@ -500,6 +511,13 @@ object EpisodeExport {
                 _statuses.value -= downloadId
                 throw error
             }
+            // Stood aside for playback: the partial file is gone and the request stays pending, so
+            // the playback watcher re-arms it once the session has been closed for a while. Not an
+            // attempt, and not a failure to show in the library.
+            if (error is ExportYieldedToPlayback) {
+                setStatus(EpisodeExportStatus(downloadId, EpisodeExportState.PENDING))
+                return Result.failure(error)
+            }
             // The observer re-enqueues every complete download still marked pending, so a failure
             // that leaves the mark in place is not one failure — it is one every time the download
             // index emits, for as long as the app lives. A device report caught 834 of them in
@@ -708,6 +726,14 @@ object EpisodeExport {
                 }
             }
         }
+        // The worker only checks for playback before it starts. A session that opens mid-export
+        // (the viewer pressed play) stops the transformer here instead of sharing the heap — and,
+        // after a fallback, the hardware decoder — with the player for the rest of the episode.
+        val yieldWatcher = launch {
+            PlaybackStatus.sessionActive.first { it }
+            DiagnosticsLog.event("Episode export yielding to playback id=${download.id}")
+            completion.completeExceptionally(ExportYieldedToPlayback())
+        }
         try {
             completion.await()
         } catch (error: Throwable) {
@@ -715,6 +741,7 @@ object EpisodeExport {
             throw error
         } finally {
             poller.cancel()
+            yieldWatcher.cancel()
         }
     }
 
