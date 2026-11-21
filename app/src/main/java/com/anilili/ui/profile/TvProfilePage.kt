@@ -638,6 +638,7 @@ internal fun TvProfilePage(
                             onResume = onResume,
                             onOpenDetails = onOpenDetails,
                             blockDown = false,
+                            focusKey = "profile",
                         )
                     }
                 }

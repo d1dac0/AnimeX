@@ -377,6 +377,7 @@ internal fun TvHomeContent(
                             onResume = onResume,
                             onOpenDetails = onOpenDetails,
                             blockDown = blockDown,
+                            focusKey = "home",
                             onFocusUp = onFocusUp,
                         )
                     }
@@ -849,7 +850,11 @@ internal fun TvMediaRail(
                 itemsIndexed(media, key = { _, item -> item.id }) { index, item ->
                     TvMediaCard(
                         media = item,
-                        onClick = { onAnimeClick(item.id) },
+                        onClick = {
+                            // Leaving for the title's page: Back restores this card.
+                            TvFocusMemory.arm(railKey, index)
+                            onAnimeClick(item.id)
+                        },
                         onFocused = { focused ->
                             if (focused) {
                                 lastFocusedIndex = index
@@ -1088,23 +1093,31 @@ internal fun TvContinueRail(
     onResume: (HistoryEntry) -> Unit,
     onOpenDetails: (HistoryEntry) -> Unit,
     blockDown: Boolean,
+    /**
+     * This row's name in [TvFocusMemory], one per page. Home, the profile page and My List all
+     * draw this rail; sharing a name let one page's row restore the cursor on another's.
+     */
+    focusKey: String,
     onFocusUp: (() -> Boolean)? = null,
     /** Null where the host page heads the rail itself, as My List does with its Expand control. */
     title: String? = "Continue watching",
     /** Empty off Home: My List and the account sheet keep drawing the row without the countdown. */
     nextReleases: Map<Int, NextEpisodeRelease> = emptyMap(),
 ) {
+    val railKey = "continue:$focusKey"
     var managedEntry by remember { mutableStateOf<HistoryEntry?>(null) }
     managedEntry?.let { entry ->
         ContinueWatchingActionsDialog(
             entry = entry,
             onDismiss = { managedEntry = null },
-            onOpenDetails = { onOpenDetails(entry) },
+            onOpenDetails = {
+                TvFocusMemory.arm(railKey, history.indexOfFirst { it.anilistId == entry.anilistId }.coerceAtLeast(0))
+                onOpenDetails(entry)
+            },
         )
     }
 
     val historyIds = history.map(HistoryEntry::anilistId)
-    val railKey = "continue:${title ?: "untitled"}"
     var lastFocusedIndex by remember(historyIds) { mutableIntStateOf(TvFocusMemory.indexOf(railKey)) }
     val itemFocusTargets = remember(historyIds) { List(history.size) { TvFocusTarget() } }
     // Each card's info button: Up from a card goes there before it leaves the rail.
@@ -1157,9 +1170,16 @@ internal fun TvContinueRail(
                     TvContinueCard(
                         entry = entry,
                         nextRelease = nextReleases[entry.anilistId],
-                        onClick = { onResume(entry) },
+                        onClick = {
+                            // Leaving for the player: Back restores this card.
+                            TvFocusMemory.arm(railKey, index)
+                            onResume(entry)
+                        },
                         onLongClick = { managedEntry = entry },
-                        onOpenDetails = { onOpenDetails(entry) },
+                        onOpenDetails = {
+                            TvFocusMemory.arm(railKey, index)
+                            onOpenDetails(entry)
+                        },
                         onRemove = { LibraryStore.removeHistory(entry.anilistId, dismissRemoteSeed = true) },
                         actionsRequester = actionRequesters[index],
                         cardRequester = itemFocusTargets[index].requester,
