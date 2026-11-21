@@ -45,7 +45,6 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -147,7 +146,6 @@ import com.anilili.data.reminder.ReleaseSyncScheduler
 import com.anilili.data.remote.FlixcloudBridge
 import com.anilili.data.remote.HanimeBridge
 import com.anilili.data.remote.PaheBridge
-import com.anilili.data.remote.PipeBridge
 import com.anilili.data.remote.canHostPipeEngine
 import com.anilili.data.settings.MenuLanguage
 import com.anilili.data.settings.SettingsStore
@@ -165,7 +163,6 @@ import com.anilili.playback.playableOfflineEpisodeId
 import com.anilili.playback.supportsMiniPlayer
 import com.anilili.ui.AllAnimeCaptchaHost
 import com.anilili.ui.CloudflareChallengeHost
-import com.anilili.ui.FirstContent
 import com.anilili.ui.FlixcloudResolverWebView
 import com.anilili.ui.HanimeResolverWebView
 import com.anilili.ui.PaheResolverWebView
@@ -867,28 +864,13 @@ private fun MiruroRoot(
     }
 
     val context = LocalContext.current
-    val pipeResolverRequired by PipeBridge.resolverRequired.collectAsState()
-    val pipeHumanCheck by PipeBridge.humanCheck.collectAsState()
+    // The Miruro pipe has no WebView in this build (it is a plain HTTP request; see OkHttpPipe),
+    // so nothing here mounts one for PipeBridge or collects its state: with no tab attached, its
+    // challenge watchdog never runs and its human check can never be raised.
     val flixcloudResolverRequired by FlixcloudBridge.resolverRequired.collectAsState()
     val hanimeResolverRequired by HanimeBridge.resolverRequired.collectAsState()
     val paheResolverRequired by PaheBridge.resolverRequired.collectAsState()
     val paheEverUsed by PaheBridge.everUsed.collectAsState()
-    // Constructing a WebView during first composition delays the first visible frame, badly so on
-    // a TV stick. The warm bridge is worth having, but not at the cost of a slower cold start, so
-    // it is stood up once the UI has settled.
-    //
-    // On TV it additionally waits for the first screen to finish loading. A device report caught
-    // the bridge building itself while home's own request was still in flight — AniList was
-    // unreachable on that network and hung for 12 seconds — so two expensive things ran at once
-    // on a box already dropping frames. Nothing waits on the resolver at startup, so it can.
-    val firstContentSettled by FirstContent.settled.collectAsState()
-    var startupGraceElapsed by remember { mutableStateOf(false) }
-    LaunchedEffect(deviceProfile.isTv) {
-        delay(if (deviceProfile.isTv) 6_000 else 2_500)
-        startupGraceElapsed = true
-    }
-    val resolverWebViewsReady =
-        startupGraceElapsed && (!deviceProfile.isTv || firstContentSettled)
     // Read once: the answer is a property of the system image, and the lookup touches the package
     // manager. It deliberately does not start a WebView to ask — see chromiumRestartIsFatal.
     val chromiumCannotRestart = remember(context) { chromiumRestartIsFatal(context) }
@@ -1126,14 +1108,6 @@ private fun MiruroRoot(
                     onDismiss = { showRandomPick = false },
                 )
             }
-            val humanCheckOrigin = pipeHumanCheck
-            if (humanCheckOrigin != null) {
-                PipeHumanCheckBackdrop(
-                    isTv = deviceProfile.isTv,
-                    onDismiss = PipeBridge::dismissHumanCheck,
-                )
-            }
-            // No engine in this build: the pipe is a plain HTTP request now. See [OkHttpPipe].
             if (flixcloudResolverRequired) {
                 FlixcloudResolverWebView()
             }
@@ -1152,66 +1126,6 @@ private fun MiruroRoot(
             com.anilili.ui.tour.WhatsNewTourOverlay()
             // Last, so the first-run setup and the profile switcher draw over everything else.
             com.anilili.ui.profiles.ProfilesHost()
-        }
-    }
-}
-
-/** How much room the challenge gets. Cloudflare's checkbox card needs far less, but its managed
- *  variants sometimes add a puzzle, and a clipped one cannot be answered. */
-private val PipeHumanCheckHeight = 420.dp
-
-/**
- * Scrim and explanation sitting behind the pipe's WebView while Cloudflare wants a human.
- *
- * Drawn as a sibling *before* the tab so the copy stays clear of it, rather than wrapping the tab
- * in a dialog — the WebView cannot be moved in the tree without being destroyed and reloaded.
- */
-@Composable
-private fun BoxScope.PipeHumanCheckBackdrop(isTv: Boolean, onDismiss: () -> Unit) {
-    Surface(
-        color = MaterialTheme.colorScheme.scrim.copy(alpha = 0.92f),
-        modifier = Modifier.fillMaxSize(),
-    ) {}
-    Column(
-        horizontalAlignment = Alignment.CenterHorizontally,
-        modifier = Modifier
-            .align(Alignment.TopCenter)
-            .fillMaxWidth()
-            .padding(horizontal = 24.dp)
-            .padding(top = 96.dp),
-    ) {
-        Text(
-            text = "A source wants to check you are human",
-            style = MaterialTheme.typography.titleMedium,
-            color = MaterialTheme.colorScheme.onSurface,
-        )
-        Spacer(Modifier.height(8.dp))
-        Text(
-            text = "Answer it once below and its servers come back. Everything else keeps playing " +
-                "either way.",
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-        if (isTv) {
-            Spacer(Modifier.height(8.dp))
-            Text(
-                // The page eats the arrows to move between its own fields, so Back is the way out.
-                text = "Move with the arrows, select with OK, or press Back to skip.",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
-    }
-    if (!isTv) {
-        val extraFocus1 = rememberFocusFill()
-        TextButton(
-            colors = extraFocus1.buttonColors(ButtonDefaults.textButtonColors()),
-            onClick = onDismiss,
-            modifier = Modifier
-                .align(Alignment.BottomCenter)
-                .padding(bottom = 48.dp).focusFill(extraFocus1, RoundedCornerShape(24.dp)),
-        ) {
-            Text("Not now")
         }
     }
 }

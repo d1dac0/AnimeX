@@ -141,7 +141,6 @@ import com.anilili.data.model.EpisodeItem
 import com.anilili.data.model.SourceVariant
 import com.anilili.data.model.StreamItem
 import com.anilili.data.model.playsInWebView
-import com.anilili.data.remote.PipeBridge
 import com.anilili.data.settings.DownloadDestination
 import com.anilili.data.settings.DownloadQuality
 import com.anilili.data.settings.EpisodeLayout
@@ -2652,35 +2651,6 @@ private fun SourceSelectors(
     var showServerDialog by remember { mutableStateOf(false) }
     val mobileSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
 
-    /**
-     * Whether answering the human check should bring the server list back.
-     *
-     * The challenge is a full-screen overlay hosted by the activity, so the sheet genuinely has to
-     * close for it — two dialogs in separate windows fight over which one takes the taps. But the
-     * viewer only opened the check to get more servers, and leaving them on the player afterwards
-     * means the sheet has to be opened a second time to use what they just unlocked.
-     */
-    var reopenAfterHumanCheck by remember { mutableStateOf(false) }
-    val humanCheckOnScreen by PipeBridge.humanCheck.collectAsState()
-    // Keyed on the challenge leaving the screen rather than on it being answered: a dismissed
-    // challenge still returns the viewer to where they were, and the button that offers it again
-    // is in that same sheet.
-    LaunchedEffect(humanCheckOnScreen) {
-        if (humanCheckOnScreen == null && reopenAfterHumanCheck) {
-            reopenAfterHumanCheck = false
-            // The same call opening the sheet by hand makes. Without it the sheet comes back
-            // carrying the short list it was opened with, which is the one thing the viewer
-            // answered the challenge to change.
-            onRequestAllSources()
-            showServerDialog = true
-        }
-    }
-    val onUnlockServers = {
-        reopenAfterHumanCheck = true
-        showServerDialog = false
-        PipeBridge.showHumanCheck()
-    }
-
     var lastOpenRequest by remember { mutableIntStateOf(openRequest) }
     LaunchedEffect(openRequest) {
         if (openRequest != lastOpenRequest) {
@@ -2776,7 +2746,6 @@ private fun SourceSelectors(
                     }
                 },
                 onRetryMiruroSources = onRetryMiruroSources,
-                onUnlockServers = onUnlockServers,
                 onClose = { showServerDialog = false },
             )
             }
@@ -2824,7 +2793,6 @@ private fun SourceSelectors(
                             }
                         },
                         onRetryMiruroSources = onRetryMiruroSources,
-                        onUnlockServers = onUnlockServers,
                     )
                 }
             }
@@ -2853,7 +2821,6 @@ private fun ColumnScope.TvServerPanelSections(
     onLanguageChange: (String?) -> Unit,
     onSelect: (WatchSourceOption) -> Unit,
     onRetryMiruroSources: () -> Unit,
-    onUnlockServers: () -> Unit,
 ) {
     MidnightSectionLabel("Show")
     SourceFilterRow(
@@ -2882,17 +2849,8 @@ private fun ColumnScope.TvServerPanelSections(
     }
     ServerChoiceRows(data, options, preferredLanguages, onSelect)
 
-    val needsHumanCheck by PipeBridge.humanCheckPending.collectAsState()
-    if (needsHumanCheck || !data.hasMiruroSources) MidnightSectionLabel("More servers")
-    if (needsHumanCheck) {
-        // Retrying cannot get past a challenge that is waiting on a person, so offer the check
-        // itself instead of a row that will fail again.
-        MidnightSettingRow(
-            title = "Unlock more servers",
-            description = "Pass a quick check to reach the Miruro servers",
-            onClick = onUnlockServers,
-        )
-    } else if (!data.hasMiruroSources) {
+    if (!data.hasMiruroSources) {
+        MidnightSectionLabel("More servers")
         MidnightSettingRow(
             title = if (data.isRetryingMiruro) "Retrying Miruro…" else "Retry Miruro servers",
             description = "Ask Miruro again for its servers",
@@ -2987,7 +2945,6 @@ private fun MobileServerPickerContent(
     onLanguageChange: (String?) -> Unit,
     onSelect: (WatchSourceOption) -> Unit,
     onRetryMiruroSources: () -> Unit,
-    onUnlockServers: () -> Unit,
     onClose: () -> Unit,
 ) {
     Column(
@@ -3055,16 +3012,7 @@ private fun MobileServerPickerContent(
             horizontalArrangement = Arrangement.End,
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            val needsHumanCheck by PipeBridge.humanCheckPending.collectAsState()
-            if (needsHumanCheck) {
-                // Retrying cannot get past a challenge that is waiting on a person, so offer the
-                // check itself instead of a button that will fail again.
-                val extraFocus3 = rememberFocusFill()
-                TextButton(
-                    colors = extraFocus3.buttonColors(ButtonDefaults.textButtonColors()),onClick = onUnlockServers, modifier = Modifier.focusFill(extraFocus3, RoundedCornerShape(24.dp)),) {
-                    Text("Unlock more servers")
-                }
-            } else if (!data.hasMiruroSources) {
+            if (!data.hasMiruroSources) {
                 val extraFocus4 = rememberFocusFill()
                 TextButton(
                     colors = extraFocus4.buttonColors(ButtonDefaults.textButtonColors()),
