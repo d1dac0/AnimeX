@@ -1,6 +1,8 @@
 package com.anilili.data.remote
 
 import android.content.Context
+import android.util.JsonReader
+import android.util.JsonToken
 import com.anilili.data.cache.AppCache
 import com.anilili.data.MetadataOverrides
 import com.anilili.data.parseDubEpisodes
@@ -10,6 +12,7 @@ import com.anilili.data.model.CoverImage
 import com.anilili.data.model.Media
 import com.anilili.data.model.MediaTitle
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
@@ -17,10 +20,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.builtins.nullable
-import kotlinx.serialization.json.jsonObject
-import kotlinx.serialization.json.jsonPrimitive
-import kotlinx.serialization.json.contentOrNull
-import kotlinx.serialization.json.intOrNull
+import java.io.InputStream
 import okhttp3.OkHttpClient
 import okhttp3.Request
 
@@ -257,19 +257,46 @@ class KonohaClient(
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
+    /**
+     * The bundled id-map's tables. Every lookup answers null from here until the parse lands
+     * (#84): a fresh instance is empty, so "not loaded yet" and "never mapped" are one answer,
+     * and no lookup ever waits for the load. The whole instance is published by one volatile
+     * write after the walk has finished, so a reader that sees it sees all of it.
+     */
     @Volatile
-    private var malToAnilistMap: Map<Int, Int>? = null
+    private var idMap = IdMapTables()
 
-    @Volatile
-    private var anilistToTmdbMap: Map<Int, TmdbRef>? = null
-
-    @Volatile
-    private var anilistToTvdbMap: Map<Int, TvdbRef>? = null
-
-    init {
-        scope.launch {
-            loadAssetMap()
+    /**
+     * The first-use parse of id-map.json, kicked off by [requestIdMapLoad] (#84).
+     *
+     * LAZY plus start() is exactly-once by construction: start() moves the coroutine from New to
+     * Active with a single CAS, so however many threads reach a lookup first, the walk runs once.
+     * It used to be launched from `init` — paying the parse on every process start, including
+     * WorkManager-only ones, and leaving `tmdbRefFor`/`tvdbRefFor` to block Main on its lock while
+     * a Detail composed — so the parse now runs here, on the client's IO scope, when something
+     * first asks. A failed walk leaves the empty instance published, as the old load left its
+     * empty maps; nothing retries it.
+     */
+    private val idMapLoad = scope.launch(start = CoroutineStart.LAZY) {
+        val startedAt = System.currentTimeMillis()
+        val parsed = try {
+            MetadataOverrides.read(context, ID_MAP_ASSET) { stream -> parseIdMap(stream) }
+        } catch (e: Exception) {
+            com.anilili.diagnostics.DiagnosticsLog.throwable("Failed to load id-map.json", e)
+            null
         }
+        val tables = parsed ?: IdMapTables()
+        idMap = tables
+        if (parsed != null) {
+            com.anilili.diagnostics.DiagnosticsLog.event(
+                "id-map loaded entries=${tables.entries} in ${System.currentTimeMillis() - startedAt}ms",
+            )
+        }
+    }
+
+    /** Kicks the first-use load without waiting for it; every start after the first is a no-op. */
+    private fun requestIdMapLoad() {
+        idMapLoad.start()
     }
 
     /**
@@ -280,8 +307,12 @@ class KonohaClient(
      * Chinese drama. Whatever this returns has to be checked against the AniList record before its
      * episode stills are put on screen — see [TmdbClient].
      */
-    fun tmdbRefFor(anilistId: Int): TmdbRef? = (anilistToTmdbMap ?: loadAssetMap().let { anilistToTmdbMap })
-        ?.get(anilistId)
+    fun tmdbRefFor(anilistId: Int): TmdbRef? {
+        // First use starts the load and answers at once. Null here means "not loaded yet" as much
+        // as "unmapped", so a Detail opened mid-parse falls back rather than blocking Main (#84).
+        requestIdMapLoad()
+        return idMap.tmdbRef(anilistId)
+    }
 
     /**
      * Which TheTVDB series an AniList id belongs to, and which season of it that entry is.
@@ -295,16 +326,25 @@ class KonohaClient(
      * Null when the cross-reference has never placed the title, which is about a fifth of the
      * catalogue; callers fall back to the relation chain.
      */
-    fun tvdbRefFor(anilistId: Int): TvdbRef? = (anilistToTvdbMap ?: loadAssetMap().let { anilistToTvdbMap })
-        ?.get(anilistId)
+    fun tvdbRefFor(anilistId: Int): TvdbRef? {
+        // Same shape as [tmdbRefFor]: kick the load, read what is published, never wait (#84).
+        requestIdMapLoad()
+        return idMap.tvdbRef(anilistId)
+    }
 
     /**
      * Resolves an AniList ID from a MyAnimeList ID.
-     * Checks the pre-loaded asset map first (instant), then falls back to AppCache/CDN.
+     * Checks the bundled map first (starting its first-use load if it has not run), then falls
+     * back to AppCache/CDN.
      */
     suspend fun resolveAnilistIdFromMal(malId: Int): Int? {
-        val assetMap = malToAnilistMap ?: loadAssetMap()
-        assetMap[malId]?.let { return it }
+        // The one lookup allowed to wait for the map, and only by suspending — this runs on
+        // background sync paths, never in composition (#84). join() also starts the LAZY job, so
+        // a MAL resolution alone triggers the load; a load that failed published empty tables and
+        // the empty lookup falls through to the CDN mapping below exactly as an unloaded one did.
+        requestIdMapLoad()
+        idMapLoad.join()
+        idMap.anilistForMal(malId)?.let { return it }
 
         return withContext(Dispatchers.IO) {
             val cacheKey = "konohamal:v1:$malId"
@@ -642,49 +682,73 @@ class KonohaClient(
     /** A file in the metadata tree, for readers that keep their own copy on disk (the neighbour graph). */
     fun dataUrl(path: String): String = "$DATA_BASE/$path"
 
-    private fun loadAssetMap(): Map<Int, Int> {
-        malToAnilistMap?.let { return it }
-        return synchronized(this) {
-            malToAnilistMap?.let { return it }
-            val map = mutableMapOf<Int, Int>()
-            val tmdb = mutableMapOf<Int, TmdbRef>()
-            val tvdb = mutableMapOf<Int, TvdbRef>()
-            try {
-                // A copy fetched by Settings → Re-download metadata when there is one; parsed inside
-                // the read, so a copy that does not parse falls back to the bundled file too.
-                val root = MetadataOverrides.read(context, "id-map.json") { stream ->
-                    json.parseToJsonElement(stream.bufferedReader().readText()).jsonObject
+    /**
+     * Streams id-map.json through [JsonReader] straight into [IdMapTables] (#84).
+     *
+     * The file is ~4.5 MB, of which only five fields per row are used. The old path read it whole
+     * into a String and then a full JsonObject tree — tens of MB of transient heap on a ~192 MB
+     * heap to keep a few ints per row — because the tree was the price of one pass over it; a
+     * stream makes the same single pass without the tree. The walk is strict and fails fast: an
+     * unreadable row throws into [MetadataOverrides.read], so a downloaded copy that does not
+     * parse falls back to the bundled file, exactly as the JSON-tree parse inside the read did.
+     */
+    private fun parseIdMap(stream: InputStream): IdMapTables {
+        val tables = IdMapTables()
+        JsonReader(stream.bufferedReader()).use { reader ->
+            reader.beginObject()
+            while (reader.hasNext()) {
+                // Top-level keys are AniList ids; anything else is a row this build cannot key,
+                // skipped whole, as the old walk skipped it.
+                val anilistId = reader.nextName().toIntOrNull()
+                if (anilistId == null) {
+                    reader.skipValue()
+                    continue
                 }
-                root.forEach { (anilistIdStr, element) ->
-                    val anilistId = anilistIdStr.toIntOrNull() ?: return@forEach
-                    val entry = element.jsonObject
-                    // Read in the same pass rather than a second one: the file is 2 MB of JSON and
-                    // parsing it twice to answer two questions about the same rows is the whole cost.
-                    entry["tmdb"]?.jsonPrimitive?.intOrNull?.let { tmdbId ->
-                        tmdb[anilistId] = TmdbRef(
-                            id = tmdbId,
-                            type = entry["tmdb_type"]?.jsonPrimitive?.contentOrNull,
-                        )
+                var tmdbId: Int? = null
+                var tmdbType: String? = null
+                var tvdbId: Int? = null
+                var tvdbSeason: Int? = null
+                var malId: Int? = null
+                reader.beginObject()
+                while (reader.hasNext()) {
+                    when (reader.nextName()) {
+                        "tmdb" -> tmdbId = reader.intOrNullValue()
+                        "tmdb_type" -> tmdbType = reader.stringOrNullValue()
+                        "tvdb" -> tvdbId = reader.intOrNullValue()
+                        "tvdb_season" -> tvdbSeason = reader.intOrNullValue()
+                        "mal" -> malId = reader.intOrNullValue()
+                        // kitsu, anidb, simkl, confidence, updated_at, bangumi: not asked of a row.
+                        else -> reader.skipValue()
                     }
-                    entry["tvdb"]?.jsonPrimitive?.intOrNull?.let { tvdbId ->
-                        tvdb[anilistId] = TvdbRef(
-                            id = tvdbId,
-                            season = entry["tvdb_season"]?.jsonPrimitive?.intOrNull,
-                        )
-                    }
-                    val malId = entry["mal"]?.jsonPrimitive?.intOrNull ?: return@forEach
-                    map[malId] = anilistId
                 }
-            } catch (e: Exception) {
-                com.anilili.diagnostics.DiagnosticsLog.throwable(
-                    "Failed to load id-map.json", e
-                )
+                reader.endObject()
+                tables.addRow(anilistId, tmdbId, tmdbType, tvdbId, tvdbSeason, malId)
             }
-            malToAnilistMap = map
-            anilistToTmdbMap = tmdb
-            anilistToTvdbMap = tvdb
-            map
+            reader.endObject()
         }
+        return tables
+    }
+
+    /**
+     * The int the next value carries, or null for `null` and for anything that is not an int,
+     * number or quoted-number form alike — the answer `JsonPrimitive.intOrNull` gave the old tree
+     * walk. A shape this cannot read (an object, an array) throws, by design: see [parseIdMap].
+     */
+    private fun JsonReader.intOrNullValue(): Int? = when (peek()) {
+        JsonToken.NULL -> {
+            nextNull()
+            null
+        }
+        else -> nextString().toIntOrNull()
+    }
+
+    /** The string the next value carries, or null for `null`; numbers come back in string form. */
+    private fun JsonReader.stringOrNullValue(): String? = when (peek()) {
+        JsonToken.NULL -> {
+            nextNull()
+            null
+        }
+        else -> nextString()
     }
 
     private companion object {
@@ -715,6 +779,9 @@ class KonohaClient(
          */
         const val DATA_BASE =
             "https://cdn.jsdelivr.net/gh/DATA_OWNER/media-index@main/data"
+
+        /** The bundled cross-reference, streamed on first use; see [idMapLoad] (#84). */
+        const val ID_MAP_ASSET = "id-map.json"
 
         const val TTL_HIT_MS = 30L * 24 * 60 * 60 * 1000 // 30 days
         /** Airing shows gain an episode weekly; six hours keeps lists fresh without re-fetching. */
@@ -747,6 +814,58 @@ class KonohaClient(
         /** Rewritten by the daily refresh; half a day lets a new season's picture arrive the same day. */
         const val HERO_BACKDROPS_TTL_MS = 12L * 60 * 60 * 1000
         const val MAX_HERO_BACKDROPS_BYTES = 2_000_000L
+    }
+}
+
+/**
+ * The three tables the bundled `id-map.json` feeds, built row by row by
+ * [KonohaClient.parseIdMap] (#84).
+ *
+ * Deliberately pure, so the JVM unit tests can hold it: `android.util.JsonReader` is a
+ * null-returning stub there and the streaming walk cannot be exercised, but everything that
+ * decides what the walk produces lives in [addRow]. A fresh instance answers null to every
+ * lookup — the answer callers get while the load is still running — and nothing mutates an
+ * instance after [KonohaClient] publishes it, so its reads need no locking of their own.
+ */
+internal class IdMapTables {
+    private val malToAnilist = HashMap<Int, Int>()
+    private val tmdbById = HashMap<Int, TmdbRef>()
+    private val tvdbById = HashMap<Int, TvdbRef>()
+
+    /** AniList rows the walk consumed, mapped or not; the count the "id-map loaded" log reports. */
+    var entries: Int = 0
+        private set
+
+    /** The bundled map's guess at the TMDB record behind [anilistId], or null when it has none. */
+    fun tmdbRef(anilistId: Int): TmdbRef? = tmdbById[anilistId]
+
+    /** The bundled map's placement of [anilistId] in a TheTVDB series, or null when unmapped. */
+    fun tvdbRef(anilistId: Int): TvdbRef? = tvdbById[anilistId]
+
+    /** The AniList id [malId] maps to, or null when the map does not know it. */
+    fun anilistForMal(malId: Int): Int? = malToAnilist[malId]
+
+    /**
+     * Folds one parsed row in.
+     *
+     * The writes follow the order the old tree walk made them: the TMDB and TVDB placements are
+     * recorded whether or not the row carries a MAL id — only the MAL write is skipped when
+     * [malId] is null. Later rows overwrite earlier ones on every key: an AniList id that appears
+     * twice keeps its last TMDB/TVDB answer, and two titles sharing a MAL id leave the later one
+     * answering the MAL lookup. That is what plain map writes gave and nothing asks for more.
+     */
+    fun addRow(
+        anilistId: Int,
+        tmdbId: Int?,
+        tmdbType: String?,
+        tvdbId: Int?,
+        tvdbSeason: Int?,
+        malId: Int?,
+    ) {
+        entries++
+        tmdbId?.let { tmdbById[anilistId] = TmdbRef(id = it, type = tmdbType) }
+        tvdbId?.let { tvdbById[anilistId] = TvdbRef(id = it, season = tvdbSeason) }
+        malId?.let { malToAnilist[it] = anilistId }
     }
 }
 
