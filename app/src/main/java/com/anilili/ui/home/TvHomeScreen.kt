@@ -119,6 +119,7 @@ import com.anilili.ui.adaptive.TvCardCornerShape
 import com.anilili.ui.adaptive.TvPanelCornerShape
 import com.anilili.ui.adaptive.TvSmallCardCornerShape
 import com.anilili.ui.adaptive.TvFocusMemory
+import com.anilili.ui.adaptive.TvRailFocusTracker
 import com.anilili.ui.adaptive.TvFocusTarget
 import com.anilili.ui.adaptive.FocusRingGap
 import com.anilili.ui.adaptive.focusHalo
@@ -230,6 +231,32 @@ internal fun TvHomeContent(
     val firstRail = rails.firstOrNull()
     val lastRail = rails.lastOrNull()
 
+    // Removing the last Continue card takes the whole row off the page, and the focus with it; the
+    // rail cannot recover what it no longer draws, so Home does: the hero when there is one,
+    // otherwise whichever rail the list's focus-enter picks. A focus loss reported while the row is
+    // being emptied is the removal itself, not the viewer leaving, so it does not count.
+    val listFocus = remember { FocusRequester() }
+    var continueHeldFocus by remember { mutableStateOf(false) }
+    val historyEmpty = history.isEmpty()
+    val latestHistoryEmpty by rememberUpdatedState(historyEmpty)
+    LaunchedEffect(historyEmpty) {
+        if (!historyEmpty || !continueHeldFocus) return@LaunchedEffect
+        continueHeldFocus = false
+        withFrameNanos { }
+        val toHero = hero != null
+        if (toHero) {
+            returnToHero()
+        } else {
+            runCatching { listFocus.requestFocus() }
+                .onFailure { DiagnosticsLog.throwable("TvHome emptied Continue row had nowhere to hand focus", it) }
+        }
+        DiagnosticsLog.event(
+            category = "focus",
+            name = "tv.home.continue_emptied",
+            attributes = mapOf("to" to if (toHero) "hero" else "list"),
+        )
+    }
+
     // What's new (ui/tour): starts once Home has settled. A row a step points at is scrolled to just
     // under the floating bar; the dice and Settings live in that bar, which shows at the top.
     StartWhatsNewTourWhenSettled()
@@ -335,6 +362,7 @@ internal fun TvHomeContent(
             // which is the spotlight at the top of the page and the nearest card anywhere else.
             modifier = modifier
                 .tvFocusTarget(primaryActionFocusTarget)
+                .focusRequester(listFocus)
                 .fillMaxSize()
                 .appCanvas(),
             contentPadding = PaddingValues(bottom = 40.dp),
@@ -371,15 +399,21 @@ internal fun TvHomeContent(
                         // another one. The rail is a LazyRow, so a card off screen costs nothing
                         // until the viewer scrolls to it, and the store's own bound (100 entries)
                         // is the only limit worth having.
-                        TvContinueRail(
-                            history = history,
-                            nextReleases = nextReleases,
-                            onResume = onResume,
-                            onOpenDetails = onOpenDetails,
-                            blockDown = blockDown,
-                            focusKey = "home",
-                            onFocusUp = onFocusUp,
-                        )
+                        Box(
+                            Modifier.onFocusChanged { state ->
+                                if (state.hasFocus || !latestHistoryEmpty) continueHeldFocus = state.hasFocus
+                            },
+                        ) {
+                            TvContinueRail(
+                                history = history,
+                                nextReleases = nextReleases,
+                                onResume = onResume,
+                                onOpenDetails = onOpenDetails,
+                                blockDown = blockDown,
+                                focusKey = "home",
+                                onFocusUp = onFocusUp,
+                            )
+                        }
                     }
                     HomeRow.FOR_YOU -> item(key = "for-you") {
                         Box(Modifier.tourTarget(TourTarget.FOR_YOU)) {
@@ -797,6 +831,10 @@ internal fun TvMediaRail(
     }
     val itemFocusTargets = remember(railIdentity, media.size) { List(media.size) { TvFocusTarget() } }
     val railState = rememberTvRailState()
+    val mediaIds = remember(media) { media.map(Media::id) }
+    val latestMediaIds by rememberUpdatedState(mediaIds)
+    val focusTracker = remember { TvRailFocusTracker() }
+    TvRailFocusRecovery("media", focusTracker, mediaIds, railState, itemFocusTargets)
 
     // Back from a show returns to the row and the card the viewer opened it from, not to the first
     // card of the first rail. Consumed once, so a later recomposition does not drag the cursor back.
@@ -840,6 +878,7 @@ internal fun TvMediaRail(
                             event.key == Key.DirectionUp
                         if (leavingUpwards && onFocusUp != null) onFocusUp() else false
                     }
+                    .onFocusChanged { if (!it.hasFocus) focusTracker.rowLostFocus(latestMediaIds) }
                     .focusProperties {
                         enter = { direction ->
                             tvRailEnterRequester(direction, itemFocusTargets, lastFocusedIndex)
@@ -861,6 +900,7 @@ internal fun TvMediaRail(
                             if (focused) {
                                 lastFocusedIndex = index
                                 TvFocusMemory.focused(railKey, index, item.id)
+                                focusTracker.cardFocused(item.id, index)
                                 onPreview(item)
                             }
                         },
@@ -898,6 +938,41 @@ internal fun TvMediaRail(
                 }
             }
         }
+    }
+}
+
+/**
+ * Puts the cursor back in a rail whose focused card was just removed from under it — the remove
+ * button on a Continue card, a revalidation that dropped the title. Compose clears focus when the
+ * focused node detaches, and nothing else would pick it up: the next press re-entered from the
+ * root. The cursor goes to the neighbour that took the card's place, or to the new last card.
+ *
+ * An emptied rail is left to its host, which usually stops drawing it at all.
+ */
+@Composable
+private fun TvRailFocusRecovery(
+    kind: String,
+    tracker: TvRailFocusTracker,
+    keys: List<Any>,
+    railState: LazyListState,
+    targets: List<TvFocusTarget>,
+) {
+    LaunchedEffect(keys) {
+        val index = tracker.recoveryIndex(keys) ?: return@LaunchedEffect
+        railState.scrollToItem(index)
+        withFrameNanos { }
+        val target = targets.getOrNull(index)?.takeIf(TvFocusTarget::isAttached)
+        if (target != null) runCatching { target.requester.requestFocus() }
+        DiagnosticsLog.event(
+            category = "focus",
+            name = "tv.rail.focus_recovered",
+            attributes = mapOf(
+                "rail" to kind,
+                "index" to index,
+                "size" to keys.size,
+                "landed" to (target?.holdsFocus == true),
+            ),
+        )
     }
 }
 
@@ -1127,6 +1202,9 @@ internal fun TvContinueRail(
     val actionRequesters = remember(historyIds) { List(history.size) { FocusRequester() } }
     var actionsFocused by remember { mutableStateOf(false) }
     val railState = rememberContinueRailState(history.firstOrNull()?.anilistId, rememberTvRailState())
+    val latestHistoryIds by rememberUpdatedState(historyIds)
+    val focusTracker = remember { TvRailFocusTracker() }
+    TvRailFocusRecovery("continue", focusTracker, historyIds, railState, itemFocusTargets)
 
     // The player's Back lands here when playback started from this row, so the cursor goes back to
     // the card it started from — see TvFocusMemory. By title, not position: playback moves the show
@@ -1159,6 +1237,11 @@ internal fun TvContinueRail(
                             if (moved) return@onPreviewKeyEvent true
                         }
                         if (onFocusUp != null) onFocusUp() else false
+                    }
+                    // The long-press menu takes focus into its own window; a card it removes is
+                    // still this row's to recover once the menu has gone.
+                    .onFocusChanged {
+                        if (!it.hasFocus) focusTracker.rowLostFocus(latestHistoryIds, keep = managedEntry != null)
                     }
                     .focusProperties {
                         enter = { direction ->
@@ -1195,6 +1278,9 @@ internal fun TvContinueRail(
                         },
                         modifier = Modifier
                             .tvFocusTarget(itemFocusTargets[index])
+                            // hasFocus, not isFocused: the corner buttons are inside the card, and
+                            // focus sits on "remove" when the card is removed.
+                            .onFocusChanged { if (it.hasFocus) focusTracker.cardFocused(entry.anilistId, index) }
                             .then(
                                 if (blockDown) {
                                     Modifier.focusProperties { down = FocusRequester.Cancel }

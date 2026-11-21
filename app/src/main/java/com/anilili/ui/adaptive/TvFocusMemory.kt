@@ -84,5 +84,58 @@ internal fun resolveRailIndex(index: Int, key: Any?, keys: List<Any?>): Int? {
     return index.coerceIn(0, keys.lastIndex)
 }
 
+/**
+ * Which card of one rail held focus, so the rail can put the cursor back when that card is removed
+ * from under it.
+ *
+ * Detaching the focused node clears focus altogether — the remove button on a Continue card, a
+ * revalidation that drops the focused title — and the next D-pad press then re-enters the screen
+ * from the root. A rail keeps one of these, reports card focus and row focus loss to it, and asks
+ * [recoveryIndex] whenever its list changes.
+ */
+class TvRailFocusTracker {
+
+    private var focusedKey: Any? = null
+    private var focusedIndex = 0
+    private var held = false
+
+    /** The card [key] at [index] (or something inside it) has focus. */
+    fun cardFocused(key: Any?, index: Int) {
+        focusedKey = key
+        focusedIndex = index
+        held = true
+    }
+
+    /**
+     * The row no longer holds focus. [keysNow] is the row's latest list: a loss caused by the
+     * focused card being removed from it is not the viewer leaving, so the row still counts as
+     * holding focus. [keep] covers the same for a loss the rail knows is temporary, such as a
+     * menu opened from one of its cards.
+     */
+    fun rowLostFocus(keysNow: List<Any?>, keep: Boolean = false) {
+        if (keep) return
+        if (focusedKey != null && focusedKey !in keysNow) return
+        held = false
+    }
+
+    /**
+     * The index to put the cursor on now that the row's list is [keys], or null when nothing needs
+     * recovering: the row did not hold focus, or its card is still there. The neighbour that took
+     * the card's place, or the new last card; null for an empty row, which the host has to handle.
+     */
+    fun recoveryIndex(keys: List<Any?>): Int? {
+        val key = focusedKey
+        if (!held || key == null || key in keys) return null
+        if (keys.isEmpty()) {
+            held = false
+            return null
+        }
+        val index = focusedIndex.coerceIn(0, keys.lastIndex)
+        focusedKey = keys[index]
+        focusedIndex = index
+        return index
+    }
+}
+
 /** The app's one rail memory; process-level on purpose, see [TvFocusMemoryStore]. */
 val TvFocusMemory = TvFocusMemoryStore()
