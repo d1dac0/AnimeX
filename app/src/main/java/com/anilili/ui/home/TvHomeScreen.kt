@@ -171,6 +171,21 @@ private const val TV_HERO_RESTING_HINT_ALPHA = .35f
 private const val TV_HERO_BACKDROP_SETTLE_MS = 600L
 
 /**
+ * The title Home's hero shows: the focused rail card's preview over the spotlight slide, and no
+ * hero at all when the spotlight is empty. A preview hero on a page without a spotlight appeared
+ * above the first rail and vanished again the moment it took focus, which pulled the page about
+ * and left Up from that rail pointing at a hero that was not there.
+ */
+internal fun <T : Any> tvHomeHero(spotlightSlide: T?, railPreview: T?): T? =
+    spotlightSlide?.let { railPreview ?: it }
+
+/**
+ * Room above Home's first row. The hero runs under the floating bar on purpose; a rail must not,
+ * or the bar covers it and Up from it has nothing above to land on.
+ */
+internal fun tvHomeListTopPadding(hasHero: Boolean): Dp = if (hasHero) 0.dp else TvTopNavigationHeight
+
+/**
  * Cinematic 10-foot Home surface. This deliberately lives beside the existing responsive Home
  * implementation so phone and tablet layouts remain unchanged.
  */
@@ -198,7 +213,9 @@ internal fun TvHomeContent(
     var heroHasFocus by remember { mutableStateOf(false) }
     var railPreview by remember(spotlight.map(Media::id)) { mutableStateOf<Media?>(null) }
     val spotlightHero = spotlight.getOrNull(spotlightIndex.coerceIn(0, (spotlight.size - 1).coerceAtLeast(0)))
-    val hero = railPreview ?: spotlightHero
+    val hero = tvHomeHero(spotlightHero, railPreview)
+    // With no spotlight there is no hero to preview in, so a focused card asks for nothing.
+    val previewRail: (Media?) -> Unit = { if (spotlightHero != null) railPreview = it }
 
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
@@ -365,7 +382,9 @@ internal fun TvHomeContent(
                 .focusRequester(listFocus)
                 .fillMaxSize()
                 .appCanvas(),
-            contentPadding = PaddingValues(bottom = 40.dp),
+            // With no hero the first rail would sit under the floating bar, and Up from it found
+            // nothing above: the bar, and with it Search and Settings, could not be reached.
+            contentPadding = PaddingValues(top = tvHomeListTopPadding(hasHero = hero != null), bottom = 40.dp),
             verticalArrangement = Arrangement.spacedBy(20.dp),
         ) {
             if (hero != null) {
@@ -388,8 +407,9 @@ internal fun TvHomeContent(
                 }
             }
             rails.forEach { row ->
-                // Up from the top rail belongs to the hero; from any other, to the rail above.
-                val onFocusUp = returnToHero.takeIf { row == firstRail }
+                // Up from the top rail belongs to the hero; from any other, to the rail above. With
+                // no hero, Up from the top rail is left to the focus search, which finds the bar.
+                val onFocusUp = returnToHero.takeIf { row == firstRail && hero != null }
                 val blockDown = row == lastRail
                 when (row) {
                     HomeRow.CONTINUE -> item(key = "continue-watching") {
@@ -421,7 +441,7 @@ internal fun TvHomeContent(
                                 title = row.label(isTv = true),
                                 media = personal.forYou,
                                 onAnimeClick = onAnimeClick,
-                                onPreview = { railPreview = it },
+                                onPreview = previewRail,
                                 blockDown = blockDown,
                                 onFocusUp = onFocusUp,
                             )
@@ -433,7 +453,7 @@ internal fun TvHomeContent(
                                 title = "Because you watched ${because?.seed?.title?.preferred}",
                                 media = because?.items.orEmpty(),
                                 onAnimeClick = onAnimeClick,
-                                onPreview = { railPreview = it },
+                                onPreview = previewRail,
                                 blockDown = blockDown,
                                 onFocusUp = onFocusUp,
                             )
@@ -446,7 +466,7 @@ internal fun TvHomeContent(
                             onSelectYear = onSelectYear,
                             onLoadMore = onLoadMoreYear,
                             onAnimeClick = onAnimeClick,
-                            onPreview = { railPreview = it },
+                            onPreview = previewRail,
                             blockDown = blockDown,
                             onFocusUp = onFocusUp,
                         )
@@ -458,7 +478,7 @@ internal fun TvHomeContent(
                                 title = row.label(isTv = true),
                                 media = data.section(section),
                                 onAnimeClick = onAnimeClick,
-                                onPreview = { railPreview = it },
+                                onPreview = previewRail,
                                 blockDown = blockDown,
                                 isLoadingMore = section in loadingMore,
                                 onLoadMore = { onLoadMore(section) },
