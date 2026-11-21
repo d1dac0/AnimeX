@@ -13,6 +13,7 @@ import android.graphics.Color
 import android.graphics.drawable.ColorDrawable
 import android.os.Build
 import android.os.Bundle
+import android.os.SystemClock
 import android.util.Rational
 import android.view.KeyEvent
 import android.view.View
@@ -343,14 +344,42 @@ class MainActivity : FragmentActivity() {
                             if (launchSplashGone) com.anilili.ui.profiles.ProfilesUi.markLaunchIntroDone()
                         }
                         Box(Modifier.fillMaxSize()) {
-                            MiruroRoot(
-                                inPictureInPicture = inPictureInPicture,
-                                onPictureInPictureReadyChanged = ::setPictureInPictureReady,
-                                pendingRoute = pendingRoute,
-                                onRouteConsumed = { pendingRoute = null },
-                                pendingLink = pendingLink,
-                                onLinkConsumed = { pendingLink = null },
-                            )
+                            // The root reads settings flows — interface size, overscan, the theme —
+                            // that only fill in once the asynchronous DataStore read lands, so
+                            // composing it against the defaults built and measured Home twice under
+                            // the splash (#90). The splash is up regardless, so the wait hides
+                            // there; the 1 s cap mirrors LaunchIntroSettingsWaitMillis, and the cap
+                            // always opens the gate in the end — a slow read costs a default-shaped
+                            // first frame, never a stuck splash.
+                            var rootSettingsReady by remember { mutableStateOf(false) }
+                            LaunchedEffect(Unit) {
+                                val startedAt = SystemClock.elapsedRealtime()
+                                var loaded = false
+                                while (rootWaitsForSettings(
+                                        settingsLoaded = loaded,
+                                        waitedMillis = SystemClock.elapsedRealtime() - startedAt,
+                                        capMillis = LaunchIntroSettingsWaitMillis,
+                                    )
+                                ) {
+                                    // A bounded slice, so a wedged read re-enters the decision every
+                                    // pass instead of being able to hold the root past the cap.
+                                    loaded = withTimeoutOrNull(RootSettingsWaitSliceMillis) {
+                                        SettingsStore.awaitLoaded()
+                                        true
+                                    } == true
+                                }
+                                rootSettingsReady = true
+                            }
+                            if (rootSettingsReady) {
+                                MiruroRoot(
+                                    inPictureInPicture = inPictureInPicture,
+                                    onPictureInPictureReadyChanged = ::setPictureInPictureReady,
+                                    pendingRoute = pendingRoute,
+                                    onRouteConsumed = { pendingRoute = null },
+                                    pendingLink = pendingLink,
+                                    onLinkConsumed = { pendingLink = null },
+                                )
+                            }
                             AllAnimeCaptchaHost()
                             CloudflareChallengeHost()
                             AnnouncementHost()
@@ -1136,9 +1165,32 @@ private fun MiruroRoot(
 /** Frames to keep retrying the rail's initial focus on slow TV boxes before giving up. */
 /**
  * How long the TV launch waits for Settings before picking an intro. The read takes milliseconds;
- * past this the water-fill mark plays rather than keeping the screen blank.
+ * past this the water-fill mark plays rather than keeping the screen blank. The root's own wait
+ * before composing (#90) reuses the cap, so the two waits end together behind the splash.
  */
-private const val LaunchIntroSettingsWaitMillis = 1_000L
+internal const val LaunchIntroSettingsWaitMillis = 1_000L
+
+/**
+ * How often the root's settings wait re-checks its cap while a read is still in flight (#90). The
+ * wait is sliced rather than a single await so a wedged read re-enters the decision instead of
+ * being able to hold the root past the cap.
+ */
+private const val RootSettingsWaitSliceMillis = 100L
+
+/**
+ * Whether the app root should still wait for Settings before composing (#90).
+ *
+ * MiruroRoot reads settings flows — interface size, overscan, the theme — that only fill in once
+ * the asynchronous DataStore read has landed, so composing against the defaults first built and
+ * measured Home twice under the splash. The wait is bounded by [capMillis]: past it the root
+ * composes with whatever settings have landed, because a slow read must cost a default-shaped
+ * first frame, never a stuck splash.
+ */
+internal fun rootWaitsForSettings(
+    settingsLoaded: Boolean,
+    waitedMillis: Long,
+    capMillis: Long,
+): Boolean = !settingsLoaded && waitedMillis < capMillis
 
 /**
  * Whether this launch may play the video intro at all; when it may, the Settings switch still
