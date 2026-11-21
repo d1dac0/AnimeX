@@ -7,6 +7,8 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -57,8 +59,18 @@ internal fun TvYearTopRatedRail(
         Unit
     }
     if (choosingYear) {
+        // The picker used to compose all 126 year rows the moment it opened (issue #49). The lazy
+        // host composes the rows on screen, and the list opens on the row holding the current
+        // value so that row is composed and can take the cursor (§31).
+        val years = remember(currentYear) { yearPickerYears(currentYear) }
+        val yearListState = rememberLazyListState(
+            initialFirstVisibleItemIndex = yearPickerInitialIndex(years, state.year),
+        )
+        var openingFocusPlaced by remember { mutableStateOf(false) }
         MidnightDialogHost(
             onDismiss = dismiss,
+            bodyListState = yearListState,
+            onBodyFocusPlaced = { openingFocusPlaced = true },
             header = { showClose ->
                 MidnightMediaHeader(
                     kicker = "Top scored by year",
@@ -69,10 +81,17 @@ internal fun TvYearTopRatedRail(
             },
             footer = { MidnightDialogFooter(quietText = "Cancel", onQuiet = dismiss) },
         ) {
-            (currentYear downTo 1900).forEach { year ->
+            items(
+                years,
+                key = { it },
+                contentType = { YEAR_ROW_CONTENT_TYPE },
+            ) { year ->
                 MidnightChoiceRow(
                     title = year.toString(),
                     selected = year == state.year,
+                    // One claim, at the opening: after the cursor has landed, a year row composed
+                    // again on the way back must not yank it off the row the viewer is on (#49).
+                    claimInitialFocus = !openingFocusPlaced,
                     onSelect = {
                         onPreview(null)
                         onSelectYear(year)

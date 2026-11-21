@@ -28,6 +28,9 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListScope
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.onFocusedBoundsChanged
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -125,6 +128,63 @@ fun MidnightDialogHost(
     }
 }
 
+/**
+ * The lazy-body variant of [MidnightDialogHost]: the same frame, but the body is a [LazyColumn], so
+ * a dialog with more rows than fit composes only the ones on screen. The year picker composed all
+ * 127 year rows the moment it opened (issue #49), and a season download composed up to a hundred
+ * rows per range — 270 or more with a Find query (issue #59) — before anything was on screen.
+ *
+ * Opt-in per call site: the scrolling [MidnightDialogHost] keeps composing every row up front, and
+ * every other dialog in the app is short enough that laziness buys nothing there.
+ *
+ * [bodyListState] is caller-owned so the caller decides where the list opens — the year picker
+ * opens on the year holding the current value (#49) — and so it survives recomposition the way a
+ * caller-supplied [bodyScrollState] does.
+ *
+ * [onBodyFocusPlaced] is called once the body's opening cursor has landed (on a television, where
+ * the opening cursor exists). Rows of a lazy body compose and dispose as it scrolls, and a row
+ * that claims the cursor on composition would re-claim it every time it is composed again on the
+ * way back, yanking the cursor off the row the viewer is on. Callers gate the row that may claim
+ * (§31) on this and stop claiming once it has fired; see [MidnightLazyDialogFrame].
+ */
+@Composable
+fun MidnightDialogHost(
+    onDismiss: () -> Unit,
+    bodyListState: LazyListState,
+    modifier: Modifier = Modifier,
+    canDismiss: Boolean = true,
+    header: @Composable ColumnScope.(showClose: Boolean) -> Unit = {},
+    footer: @Composable ColumnScope.() -> Unit = {},
+    onBodyFocusPlaced: (() -> Unit)? = null,
+    body: LazyListScope.() -> Unit,
+) {
+    val device = LocalAppDeviceProfile.current
+    val dismiss: () -> Unit = { if (canDismiss) onDismiss() }
+    if (device.isTv) {
+        MidnightTvCard(onDismiss = dismiss, modifier = modifier) {
+            MidnightLazyDialogFrame(
+                showClose = false,
+                header = header,
+                footer = footer,
+                listState = bodyListState,
+                onBodyFocusPlaced = onBodyFocusPlaced,
+                body = body,
+            )
+        }
+    } else {
+        MidnightSheet(onDismiss = dismiss, modifier = modifier) {
+            MidnightLazyDialogFrame(
+                showClose = true,
+                header = header,
+                footer = footer,
+                listState = bodyListState,
+                onBodyFocusPlaced = onBodyFocusPlaced,
+                body = body,
+            )
+        }
+    }
+}
+
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun ColumnScope.MidnightDialogFrame(
@@ -194,6 +254,75 @@ private fun ColumnScope.MidnightDialogFrame(
     footer()
 }
 
+/**
+ * The lazy body's frame: the same header, weighted body and footer as [MidnightDialogFrame], with
+ * a [LazyColumn] instead of a scrolling Column, so only the rows on screen are composed (#49,
+ * #59). The list sizes to its content when it is short, exactly as the scrolling Column does.
+ *
+ * The opening scroll runs here too. A lazy list has no absolute scroll value to coerce, so the
+ * opening placement is a relative delta ([lazyOpeningScrollDelta]) and it lands where the
+ * scrolling frame's does: forward just far enough to bring a row that hangs below the fold onto
+ * the screen, and nowhere at all when the focused row already fits — the caller that opens the
+ * list on a row (the year picker, #49) has already put it where it should stand.
+ */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun ColumnScope.MidnightLazyDialogFrame(
+    showClose: Boolean,
+    header: @Composable ColumnScope.(Boolean) -> Unit,
+    footer: @Composable ColumnScope.() -> Unit,
+    listState: LazyListState,
+    onBodyFocusPlaced: (() -> Unit)?,
+    body: LazyListScope.() -> Unit,
+) {
+    header(showClose)
+    val onTv = LocalAppDeviceProfile.current.isTv
+    var viewport by remember { mutableStateOf(0) }
+    var container by remember { mutableStateOf<LayoutCoordinates?>(null) }
+    var cursor by remember { mutableStateOf<LayoutCoordinates?>(null) }
+    if (onTv) {
+        LaunchedEffect(listState) {
+            val delta = snapshotFlow { lazyOpeningScrollDelta(container, cursor, viewport, listState) }
+                .filterNotNull()
+                .first()
+            // The opening cursor has landed: every row that was going to claim it has. A lazy
+            // body composes and disposes rows as it scrolls, so this has to happen before the
+            // scroll below starts moving rows in and out — past this point a row composed again
+            // on the way back must not claim the cursor, or it yanks it off the row the viewer
+            // is on (#49, #59). Callers pass the flag this closes to the row that may claim.
+            onBodyFocusPlaced?.invoke()
+            listState.scroll(MutatePriority.PreventUserInput) {
+                scrollBy(delta.toFloat())
+                // Held for a few frames because the container's animation is queued, not
+                // instantaneous: releasing immediately just lets it run after us.
+                repeat(OPENING_SCROLL_HOLD_FRAMES) { withFrameNanos { } }
+            }
+        }
+    }
+    MidnightLazyBodyTopStop(listState)
+    LazyColumn(
+        state = listState,
+        // fill = false so the body shrinks to its content when it is short, and stops at whatever
+        // the header and footer left when it is long — the same rule the scrolling frame follows.
+        modifier = Modifier
+            .weight(1f, fill = false)
+            .then(
+                // Only a television is measured here: the opening scroll above is the only
+                // reader, a touch device never has a cursor to place.
+                if (onTv) {
+                    Modifier
+                        .onSizeChanged { viewport = it.height }
+                        .onFocusedBoundsChanged { cursor = it }
+                        .onGloballyPositioned { container = it }
+                } else {
+                    Modifier
+                },
+            ),
+        content = body,
+    )
+    footer()
+}
+
 /** Frames the opening scroll is held for; long enough to outlast the container's own request. */
 private const val OPENING_SCROLL_HOLD_FRAMES = 6
 
@@ -213,6 +342,31 @@ private fun openingScrollTarget(
     if (scroll.maxValue == Int.MAX_VALUE) return null
     val bottom = container.localBoundingBoxOf(cursor, clipBounds = false).bottom
     return (scroll.value + bottom.toInt() - viewport).coerceIn(0, scroll.maxValue)
+}
+
+/**
+ * The scroll delta that shows the focused row the way [openingScrollTarget] does for the scrolling
+ * frame: as little as possible, with the row's bottom on the viewport's bottom edge. Expressed
+ * relative to the current position because a lazy list has no absolute scroll value to coerce into
+ * range — the scroll clamps itself at both ends. Null while the body is still being laid out or
+ * nothing in it has the cursor yet.
+ *
+ * Never negative. A row that already fits needs no scroll at all, and the scrolling frame never
+ * moves for one either — at its opening scroll it stands at zero, where a negative delta clamps to
+ * nothing. But a lazy body opened on a row (#49) stands further down, where the unclamped delta
+ * would scroll backward and drag the caller's opening placement up a couple of rows for no reason.
+ */
+private fun lazyOpeningScrollDelta(
+    container: LayoutCoordinates?,
+    cursor: LayoutCoordinates?,
+    viewport: Int,
+    state: LazyListState,
+): Int? {
+    if (container == null || cursor == null || viewport <= 0) return null
+    if (!container.isAttached || !cursor.isAttached) return null
+    if (state.layoutInfo.totalItemsCount == 0) return null
+    val bottom = container.localBoundingBoxOf(cursor, clipBounds = false).bottom
+    return (bottom.toInt() - viewport).coerceAtLeast(0)
 }
 
 /**
@@ -244,6 +398,38 @@ private fun MidnightBodyTopStop(scroll: ScrollState) {
             .height(1.dp)
             .onFocusChanged { if (it.isFocused && scroll.value > 0) scope.launch { scroll.animateScrollTo(0) } }
             .then(if (scroll.maxValue > 0) Modifier.focusTarget() else Modifier),
+    )
+}
+
+/**
+ * The scrolling frame's [MidnightBodyTopStop] for a lazy body, which has no [ScrollState] to
+ * return to the top of. It sits outside the list, above it, for the same reason: Up from the
+ * first option has to land somewhere, and landing here returns the body to the top. Up only
+ * reaches it once the list stands at item zero — anything above the visible rows is not composed
+ * yet, and the list scrolls to reveal one more option per Up before the search looks outside it.
+ */
+@Composable
+private fun MidnightLazyBodyTopStop(listState: LazyListState) {
+    if (!LocalAppDeviceProfile.current.isTv) return
+    val scope = rememberCoroutineScope()
+    Box(
+        Modifier
+            .fillMaxWidth()
+            .height(1.dp)
+            .onFocusChanged {
+                if (it.isFocused &&
+                    (listState.firstVisibleItemIndex > 0 || listState.firstVisibleItemScrollOffset > 0)
+                ) {
+                    scope.launch { listState.animateScrollToItem(0) }
+                }
+            }
+            .then(
+                if (listState.canScrollForward || listState.canScrollBackward) {
+                    Modifier.focusTarget()
+                } else {
+                    Modifier
+                },
+            ),
     )
 }
 
