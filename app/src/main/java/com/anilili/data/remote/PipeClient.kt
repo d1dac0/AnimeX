@@ -30,14 +30,26 @@ class PipeClient(
 ) {
     @Volatile private var config: Pair<Long, List<MiruroCatalog.ProviderConfig>>? = null
     private val titles = ConcurrentHashMap<Int, MiruroCatalog.Title>()
-    private val episodeLists = ConcurrentHashMap<String, List<MiruroCatalog.Episode>>()
+
+    /**
+     * Episode rows per Miruro title. Up to [MAX_EPISODES] rows each — twenty thousand of them —
+     * and one was kept for every title the app ever looked at, for the life of the process. #72
+     * bounds it at [EPISODE_LISTS] titles, least-recently-used out: more than a session touches.
+     */
+    private val episodeLists = BoundedLruMap<String, List<MiruroCatalog.Episode>>(capacity = EPISODE_LISTS)
 
     /**
      * Recent `play` responses. One answers every server for an episode, while the resolver asks per
      * server and variant — so without this, walking five servers of one episode was five identical
-     * requests. Short-lived because the stream URLs inside are signed.
+     * requests. Short-lived because the stream URLs inside are signed, so the TTL is the map's, and
+     * #72 bounds it at [PLAY_RESPONSES] responses: each is a full parsed play body, and every one
+     * a viewer ever caused used to be held until the process died.
      */
-    private val plays = ConcurrentHashMap<String, Pair<Long, JsonObject>>()
+    private val plays = BoundedTtlMap<String, JsonObject>(
+        capacity = PLAY_RESPONSES,
+        ttlMs = PLAY_TTL_MS,
+        nowMs = SystemClock::elapsedRealtime,
+    )
 
     // ---- episodes ----
 
@@ -116,17 +128,18 @@ class PipeClient(
             all += page
             cursor = next
         } while (cursor != null && all.size < MAX_EPISODES)
-        if (all.isNotEmpty()) episodeLists[titleId] = all
+        if (all.isNotEmpty()) episodeLists.put(titleId, all)
         return all
     }
 
     private suspend fun play(titleId: String, episode: String): JsonObject {
         val key = "$titleId:$episode"
-        plays[key]?.takeIf { SystemClock.elapsedRealtime() - it.first < PLAY_TTL_MS }?.let { return it.second }
+        // The TTL is the map's own: an entry past it answers null and is dropped right there.
+        plays[key]?.let { return it }
         val text = MiruroCatalogApi.get("v1/anime/$titleId/episodes/$episode/play", budgetMs = PIPE_SOURCE_RESPONSE_TIMEOUT_MS)
         val parsed = json.parseToJsonElement(text) as? JsonObject
             ?: throw IOException("Miruro play response was not an object")
-        plays[key] = SystemClock.elapsedRealtime() to parsed
+        plays.put(key, parsed)
         return parsed
     }
 
@@ -134,6 +147,15 @@ class PipeClient(
         const val CONFIG_TTL_MS = 30 * 60_000L
         const val PLAY_TTL_MS = 2 * 60_000L
         const val MAX_EPISODES = 20_000
+
+        /**
+         * How many titles' episode lists and how many play responses are kept (#72). One play
+         * response answers every server of an episode, and the resolver walks five of them —
+         * so eight holds a viewer's recent walks with room to spare; sixteen titles of episode
+         * rows is far more than one session browses.
+         */
+        const val PLAY_RESPONSES = 8
+        const val EPISODE_LISTS = 16
     }
 }
 

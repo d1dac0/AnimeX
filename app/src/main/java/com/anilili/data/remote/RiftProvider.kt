@@ -89,9 +89,16 @@ internal class RiftProvider(
     /**
      * Episode rows by Rift id, since the catalogue lookup and the resolve both need them, with when
      * they were read. Kept for [EPISODES_TTL_MS] only: an airing title gains a row a week, and a list
-     * held for the life of the process (a TV box's can be days) never learned of it.
+     * held for the life of the process (a TV box's can be days) never learned of it. #72 also bounds
+     * it at [EPISODE_ROW_TITLES] titles, so the map cannot grow with every title browsed either;
+     * rows serve the title being watched or matched, and the TTL already bounds their age.
      */
-    private val episodeRows = ConcurrentHashMap<String, Pair<Long, List<RiftParser.RiftEpisode>>>()
+    private val episodeRows = BoundedTtlMap<String, List<RiftParser.RiftEpisode>>(
+        capacity = EPISODE_ROW_TITLES,
+        ttlMs = EPISODES_TTL_MS,
+        // The wall clock is what the old read check used; the map only carries it over.
+        nowMs = System::currentTimeMillis,
+    )
 
     /** Whether a title carries any Arabic dub at all, probed once from its first episode. */
     private val dubbed = ConcurrentHashMap<String, Boolean>()
@@ -249,11 +256,10 @@ internal class RiftProvider(
     }
 
     private fun episodes(titleId: String): List<RiftParser.RiftEpisode> {
-        episodeRows[titleId]
-            ?.takeIf { (readAt, _) -> System.currentTimeMillis() - readAt < EPISODES_TTL_MS }
-            ?.let { (_, rows) -> return rows }
+        // The TTL is the map's own: an entry past it answers null and is dropped right there.
+        episodeRows[titleId]?.let { return it }
         val root = api(path = "/library/episodes/$titleId?sort_by_latest=1&with_arcs=true&with_favorites=true")
-        return RiftParser.episodes(root).also { episodeRows[titleId] = System.currentTimeMillis() to it }
+        return RiftParser.episodes(root).also { episodeRows.put(titleId, it) }
     }
 
     /**
@@ -601,6 +607,10 @@ internal class RiftProvider(
         const val RETRY_MS = 2_000L
         const val MAX_QUERIES = 3
         const val EPISODES_TTL_MS = 30 * 60 * 1000L
+
+        /** Titles of episode rows held (#72). Rows only serve the title in play, and the TTL
+         * already bounds their age; eight covers a resolver walk plus some browsing. */
+        const val EPISODE_ROW_TITLES = 8
 
         /** Bounds on one resolve: each stream costs a `can_play` and a `direct_link`. */
         const val MAX_STREAMS = 6
