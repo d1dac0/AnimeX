@@ -6,11 +6,11 @@ import androidx.compose.material.icons.outlined.Visibility
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.outlined.StarOutline
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import com.anilili.data.AppGraph
 import com.anilili.data.auth.AccountService
@@ -36,7 +36,11 @@ import com.anilili.ui.dialogs.MidnightNoticeTone
 import com.anilili.ui.dialogs.MidnightSectionLabel
 import com.anilili.ui.dialogs.MidnightSelectionRow
 import com.anilili.ui.dialogs.MidnightStatusRow
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Whether the device's saved row should survive a move to [status].
@@ -49,6 +53,15 @@ import kotlinx.coroutines.launch
  * PLANNING, so the unsave that follows the removal is a no-op against the status just written.
  */
 internal fun savedRowSurvivesMoveTo(status: String): Boolean = status == "PLANNING"
+
+/**
+ * Where the menu's account writes run: outside the dialog's composition, so closing the menu while
+ * a status change or a removal is in flight does not cancel it. The television card lets Back close
+ * it mid-request (#57); with the dialog's own scope that would abandon the call after the account
+ * may already have applied it, and skip the local bookkeeping that follows a success. Main, like the
+ * composition scope it replaces, because the follow-up touches the dialog's state and the stores.
+ */
+private val listWriteScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
 /**
  * Take one title's entry off the account, then make this device agree with it.
@@ -124,7 +137,11 @@ fun AnimeListActionsDialog(
     val currentScore = remoteScores[anilistId]
     var scoring by remember(anilistId) { mutableStateOf(false) }
     var editingProgress by remember(anilistId) { mutableStateOf(false) }
-    val scope = rememberCoroutineScope()
+    // Whether this menu is still on screen. A write that finishes after the viewer has closed it
+    // must not close the caller's next dialog — a menu opened since for another title, say.
+    val showing = remember(anilistId) { AtomicBoolean(true) }
+    DisposableEffect(showing) { onDispose { showing.set(false) } }
+    val dismissIfShowing: () -> Unit = { if (showing.get()) onDismiss() }
     var busyStatus by remember(anilistId) { mutableStateOf<String?>(null) }
     var deleting by remember(anilistId) { mutableStateOf(false) }
     var confirmingDelete by remember(anilistId) { mutableStateOf(false) }
@@ -165,7 +182,7 @@ fun AnimeListActionsDialog(
         DiagnosticsLog.event(
             "List status requested from=$kicker service=${service.label} id=$anilistId status=$status",
         )
-        scope.launch {
+        listWriteScope.launch {
             runCatching {
                 if (status == "COMPLETED" && completedMarksWatched) {
                     AppGraph.repository.setAnimeWatched(anilistId, true, totalEpisodes)
@@ -186,7 +203,7 @@ fun AnimeListActionsDialog(
                         "List status confirmed from=$kicker service=${service.label} id=$anilistId status=$status",
                     )
                     onMoved()
-                    onDismiss()
+                    dismissIfShowing()
                 }
                 .onFailure { error ->
                     errorMessage = error.toFailure(
@@ -208,11 +225,11 @@ fun AnimeListActionsDialog(
         if (service == null || busy) return
         deleting = true
         errorMessage = null
-        scope.launch {
+        listWriteScope.launch {
             deleteAnimeListEntry(anilistId, from = kicker)
                 .onSuccess {
                     onMoved()
-                    onDismiss()
+                    dismissIfShowing()
                 }
                 .onFailure { error ->
                     errorMessage = error.toFailure(

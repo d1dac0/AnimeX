@@ -60,6 +60,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.disabled
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
@@ -119,7 +121,10 @@ internal fun TvAnimeListActionsCard(
     val accent = MaterialTheme.colorScheme.primary
     val initialFocus = remember { FocusRequester() }
     Dialog(
-        onDismissRequest = { if (!busy) onDismiss() },
+        // Back closes the card even mid-request: the write runs in a scope of its own (see
+        // AnimeListActionsDialog), so leaving does not cancel it, and a slow account call no longer
+        // holds the remote hostage for up to the client's 45 s timeout.
+        onDismissRequest = onDismiss,
         properties = DialogProperties(usePlatformDefaultWidth = false),
     ) {
         Box(
@@ -181,7 +186,6 @@ internal fun TvAnimeListActionsCard(
                                 icon = Icons.Filled.Close,
                                 label = "Close",
                                 onClick = onDismiss,
-                                enabled = !busy,
                                 modifier = Modifier.width(150.dp),
                             )
                         }
@@ -329,7 +333,6 @@ internal fun TvAnimeListActionsCard(
                                 icon = Icons.Filled.Close,
                                 label = "Close",
                                 onClick = onDismiss,
-                                enabled = !busy,
                                 onFocused = { hint = if (it) "Close" else hint.takeIf { h -> h != "Close" } },
                                 modifier = Modifier.focusProperties { right = FocusRequester.Cancel },
                             )
@@ -538,7 +541,7 @@ private fun TvListButton(
             .clip(shape)
             .background(container)
             .border(1.dp, outline, shape)
-            .clickable(enabled = enabled, role = Role.Button, onClickLabel = label, onClick = onClick)
+            .then(clickableWhileFocusable(enabled, label, onClick))
             .padding(horizontal = 14.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.Center,
@@ -595,7 +598,7 @@ private fun TvListIconButton(
             .clip(CircleShape)
             .background(container)
             .border(1.dp, outline, CircleShape)
-            .clickable(enabled = enabled, role = Role.Button, onClickLabel = label, onClick = onClick),
+            .then(clickableWhileFocusable(enabled, label, onClick)),
         contentAlignment = Alignment.Center,
     ) {
         if (busy) {
@@ -605,6 +608,19 @@ private fun TvListIconButton(
         }
     }
 }
+
+/**
+ * A click target that stays focusable when [enabled] is false and only ignores the press.
+ *
+ * `clickable(enabled = false)` also drops the node out of focus, so pressing a status — which marks
+ * every button busy — took the focus off the very button under the cursor and left the remote with
+ * no ring to move from, during the request and after a failure (#57). The dimming the callers apply
+ * already says the press would do nothing; the semantics say it too.
+ */
+private fun clickableWhileFocusable(enabled: Boolean, label: String, onClick: () -> Unit): Modifier =
+    Modifier
+        .semantics { if (!enabled) disabled() }
+        .clickable(role = Role.Button, onClickLabel = label) { if (enabled) onClick() }
 
 /** Lets the label give way to the check mark instead of pushing it out of a narrow button. */
 private fun Modifier.weightIfRow(scope: RowScope): Modifier = with(scope) { this@weightIfRow.weight(1f, fill = false) }
