@@ -94,15 +94,28 @@ internal fun heroPictureGeometry(src: Size, slide: Size): HeroPictureGeometry {
  * A landscape picture drawn by [heroPictureGeometry], its left edge faded out of the picture's own
  * pixels (offscreen, DstIn) rather than painted over in black, so it meets whatever the slide sits
  * on — the canvas or the viewer's own background picture — without a seam.
+ *
+ * The offscreen layer that lets the mask reach only the picture is the most expensive rectangle
+ * on the page (#48), so [lowCostTvEffects] skips it and paints the fade in the canvas colour over
+ * the picture instead: no layer, no mask, and over the plain canvas the melt looks the same. Over
+ * a viewer's own background picture it paints the canvas colour across it — the simplification
+ * #48 accepts there.
  */
 @Composable
-private fun HeroPicture(url: String, modifier: Modifier) {
+private fun HeroPicture(url: String, lowCostTvEffects: Boolean, modifier: Modifier) {
     // Fit, so the request asks for a bitmap no larger than the slide. The size the painter is
     // drawn at below is what decides how it looks.
     val painter = rememberAsyncImagePainter(model = url, contentScale = ContentScale.Fit)
+    val canvas = MaterialTheme.colorScheme.background
     Spacer(
         modifier
-            .graphicsLayer { compositingStrategy = CompositingStrategy.Offscreen }
+            .then(
+                if (lowCostTvEffects) {
+                    Modifier
+                } else {
+                    Modifier.graphicsLayer { compositingStrategy = CompositingStrategy.Offscreen }
+                },
+            )
             .drawBehind {
                 val src = painter.intrinsicSize
                 if (src.isUnspecified || src.width <= 0f || src.height <= 0f) {
@@ -115,15 +128,29 @@ private fun HeroPicture(url: String, modifier: Modifier) {
                 translate(geometry.left, geometry.top) {
                     with(painter) { draw(Size(src.width * geometry.scale, src.height * geometry.scale)) }
                 }
-                drawRect(
-                    Brush.horizontalGradient(
-                        0f to Color.Transparent,
-                        1f to Color.Black,
-                        startX = geometry.fadeStart,
-                        endX = geometry.fadeEnd,
-                    ),
-                    blendMode = BlendMode.DstIn,
-                )
+                if (lowCostTvEffects) {
+                    // (#48) The mask's own fade, inverted and painted in the canvas colour: the
+                    // picture emerges as the cover thins, and the layer the mask needed is never
+                    // drawn.
+                    drawRect(
+                        Brush.horizontalGradient(
+                            0f to canvas,
+                            1f to Color.Transparent,
+                            startX = geometry.fadeStart,
+                            endX = geometry.fadeEnd,
+                        ),
+                    )
+                } else {
+                    drawRect(
+                        Brush.horizontalGradient(
+                            0f to Color.Transparent,
+                            1f to Color.Black,
+                            startX = geometry.fadeStart,
+                            endX = geometry.fadeEnd,
+                        ),
+                        blendMode = BlendMode.DstIn,
+                    )
+                }
             },
     )
 }
@@ -136,6 +163,10 @@ private fun HeroPicture(url: String, modifier: Modifier) {
  * a deliberately small copy becomes the soft ambient background while the complete poster remains
  * visible at the right. The low-resolution request also avoids decoding a second full-size bitmap
  * just to blur it.
+ *
+ * [lowCostTvEffects] drops the parts the cheap boxes cannot carry (#48): the offscreen layer and
+ * mask behind the landscape fade, and the 34dp blur behind the ambient cover. Home passes the
+ * profile's answer; the default keeps every other caller rendering as it does today.
  */
 @Composable
 fun TvHeroArtwork(
@@ -145,12 +176,13 @@ fun TvHeroArtwork(
     posterTopPadding: Int = 24,
     /** A real landscape picture from elsewhere (TheTVDB fanart, TMDB) where AniList has no banner. */
     wideArtwork: String? = media.wideHeroArtwork(),
+    lowCostTvEffects: Boolean = false,
 ) {
     val cover = media.coverImage.best
 
     Box(modifier.clipToBounds().appCanvas()) {
         if (wideArtwork != null) {
-            HeroPicture(wideArtwork, Modifier.fillMaxSize())
+            HeroPicture(wideArtwork, lowCostTvEffects, Modifier.fillMaxSize())
         } else if (cover != null) {
             val context = LocalContext.current
             val ambientRequest = remember(cover) {
@@ -169,7 +201,9 @@ fun TvHeroArtwork(
                         scaleX = 1.16f
                         scaleY = 1.16f
                     }
-                    .blur(34.dp),
+                    // (#48) The ambient blur is a redraw pass the low-cost boxes cannot spare, and
+                    // their copy is already soft from the stretch across the slide.
+                    .then(if (lowCostTvEffects) Modifier else Modifier.blur(34.dp)),
                 contentScale = ContentScale.Crop,
             )
             Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.30f)))

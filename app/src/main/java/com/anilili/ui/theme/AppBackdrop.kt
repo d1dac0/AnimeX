@@ -50,6 +50,8 @@ import coil.size.Scale
 import com.anilili.data.settings.AppBackdropSource
 import com.anilili.data.settings.SettingsStore
 import com.anilili.diagnostics.DiagnosticsLog
+import com.anilili.ui.adaptive.rememberIsTelevision
+import com.anilili.ui.adaptive.shouldUseLowCostTvEffects
 import com.anilili.ui.dialogs.boxBlur
 import com.anilili.ui.rethrowIfCancellation
 import kotlinx.coroutines.Dispatchers
@@ -105,8 +107,19 @@ internal fun ProvideAppBackdrop(content: @Composable () -> Unit) {
     val context = LocalContext.current
     val view = LocalView.current
     val configuration = LocalConfiguration.current
+    // (#48) The device profile is provided below the theme, and this runs inside the theme, so the
+    // low-cost answer is reached the way the theme reaches its form factor: from the device's own
+    // signals, through the same predicate the profile uses.
+    val activityManager = remember(context.applicationContext) {
+        context.applicationContext.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager
+    }
+    val lowCostTvEffects = shouldUseLowCostTvEffects(
+        rememberIsTelevision(),
+        activityManager?.isLowRamDevice == true,
+        activityManager?.memoryClass,
+    )
     var backdrop by remember { mutableStateOf<AppBackdrop?>(null) }
-    LaunchedEffect(url, dim, blur, configuration.screenWidthDp, configuration.screenHeightDp) {
+    LaunchedEffect(url, dim, blur, configuration.screenWidthDp, configuration.screenHeightDp, lowCostTvEffects) {
         if (url == null) {
             backdrop = null
             return@LaunchedEffect
@@ -119,7 +132,7 @@ internal fun ProvideAppBackdrop(content: @Composable () -> Unit) {
             awaitFrame()
             size = IntSize(view.rootView.width, view.rootView.height)
         }
-        backdrop = renderAppBackdrop(context, url, size, dim.alpha, blur)?.let(::AppBackdrop)
+        backdrop = renderAppBackdrop(context, url, size, dim.alpha, blur, lowCostTvEffects)?.let(::AppBackdrop)
     }
     CompositionLocalProvider(LocalAppBackdrop provides backdrop, content = content)
 }
@@ -159,11 +172,20 @@ fun Modifier.appCanvas(): Modifier = composed {
  * instead — every stop's alpha kept — so the artwork melts into the picture rather than into a band
  * of black. Stops that were plain black scrims become that much of the (already darkened) picture,
  * which darkens the artwork the same way.
+ *
+ * [lowCostTvEffects] skips that mask: its `saveLayer` is the most expensive thing a fade can do
+ * (#48), so a cheap box paints the gradient straight in the canvas colour, exactly as it is painted
+ * when no background picture is set, and the picture behind the fade stays plain. Callers that do
+ * not pass the flag keep the masked fade.
  */
-fun Modifier.appCanvasFade(alpha: () -> Float = { 1f }, brush: (canvas: Color) -> Brush): Modifier = composed {
+fun Modifier.appCanvasFade(
+    alpha: () -> Float = { 1f },
+    lowCostTvEffects: Boolean = false,
+    brush: (canvas: Color) -> Brush,
+): Modifier = composed {
     val backdrop = LocalAppBackdrop.current
     val colour = MaterialTheme.colorScheme.background
-    if (backdrop == null) {
+    if (backdrop == null || lowCostTvEffects) {
         val painted = remember(colour) { brush(colour) }
         drawBehind { drawRect(painted, alpha = alpha().coerceIn(0f, 1f)) }
     } else {
@@ -221,9 +243,9 @@ private fun DrawScope.drawBackdropSlice(backdrop: AppBackdrop, position: Offset,
  * centre, blurred if asked, darkened by [dim]. Null when the picture cannot be loaded, which leaves
  * the plain canvas — a background is never worth an error on screen.
  *
- * Stored small. Blurred, it is drawn from half the window's resolution (a third on a low-RAM
- * device), where the blur hides the scaling entirely; sharp, from at most [SHARP_LONG_SIDE] pixels
- * on the long side. Both fit in a few megabytes.
+ * Stored small. Blurred, it is drawn from half the window's resolution — a third where the bitmap
+ * has to be smaller (see [backdropRenderScale]) — where the blur hides the scaling entirely; sharp,
+ * from at most [SHARP_LONG_SIDE] pixels on the long side. Both fit in a few megabytes.
  */
 internal suspend fun renderAppBackdrop(
     context: Context,
@@ -231,13 +253,11 @@ internal suspend fun renderAppBackdrop(
     window: IntSize,
     dim: Float,
     blur: Boolean,
+    lowCostTvEffects: Boolean = false,
 ): ImageBitmap? {
     val lowRam = (context.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager)?.isLowRamDevice == true
     val longSide = maxOf(window.width, window.height).toFloat()
-    val scale = when {
-        blur -> if (lowRam) 1f / 3 else 0.5f
-        else -> minOf(1f, (if (lowRam) SHARP_LOW_RAM_LONG_SIDE else SHARP_LONG_SIDE) / longSide)
-    }
+    val scale = backdropRenderScale(lowRam, lowCostTvEffects, blur, longSide)
     val width = (window.width * scale).roundToInt().coerceAtLeast(1)
     val height = (window.height * scale).roundToInt().coerceAtLeast(1)
     return try {
@@ -269,7 +289,7 @@ internal suspend fun renderAppBackdrop(
             canvas.drawColor(android.graphics.Color.argb((dim * 255).roundToInt(), 0, 0, 0))
             DiagnosticsLog.event(
                 "App background baked ${decoded.width}x${decoded.height} -> ${width}x$height " +
-                    "blur=$blur dim=$dim lowRam=$lowRam",
+                    "blur=$blur dim=$dim lowRam=$lowRam lowCost=$lowCostTvEffects",
             )
             baked.asImageBitmap()
         }
@@ -294,8 +314,26 @@ internal fun centreCrop(sourceW: Int, sourceH: Int, targetW: Int, targetH: Int):
     }
 }
 
+/**
+ * How large a baked background is drawn from, as a fraction of the window.
+ *
+ * Blurred, the blur hides the scaling, so the picture is baked from half the window — a third
+ * where the bitmap has to be smaller: a low-RAM device, and, because the memory class alone misses
+ * cheap television boxes with a roomy heap (#48), anything the profile calls [lowCostTvEffects].
+ * Sharp, the long side is capped the same way, and never scaled up.
+ */
+internal fun backdropRenderScale(
+    lowRam: Boolean,
+    lowCostTvEffects: Boolean,
+    blur: Boolean,
+    longSide: Float,
+): Float = when {
+    blur -> if (lowRam || lowCostTvEffects) 1f / 3 else 0.5f
+    else -> minOf(1f, (if (lowRam || lowCostTvEffects) SHARP_LOW_RAM_LONG_SIDE else SHARP_LONG_SIDE) / longSide)
+}
+
 /** A sharp picture's long side, in pixels: enough for a phone or a 1080p television at arm's length. */
 private const val SHARP_LONG_SIDE = 1600f
 
-/** A sharp picture's long side on a low-RAM device. */
+/** A sharp picture's long side on a low-RAM device, or one the profile calls low-cost. */
 private const val SHARP_LOW_RAM_LONG_SIDE = 960f
