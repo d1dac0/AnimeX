@@ -24,6 +24,9 @@ object DiagnosticsPerformanceMonitor {
     @Volatile private var previousElapsedMs = 0L
     @Volatile private var previousCpuMs = 0L
 
+    /** Guards the lazy start of the sampler thread below. */
+    private val handlerLock = Any()
+
     private val sample = object : Runnable {
         override fun run() {
             val currentHandler = handler ?: return
@@ -38,10 +41,8 @@ object DiagnosticsPerformanceMonitor {
     @Volatile private var appContext: Context? = null
 
     fun install(application: Application) {
+        ensureHandler(application)
         if (!installed.compareAndSet(false, true)) return
-        appContext = application.applicationContext
-        val thread = HandlerThread("anilili-performance", Process.THREAD_PRIORITY_BACKGROUND).apply { start() }
-        handler = Handler(thread.looper)
         application.registerActivityLifecycleCallbacks(object : Application.ActivityLifecycleCallbacks {
             override fun onActivityStarted(activity: Activity) {
                 if (foregroundActivities.incrementAndGet() == 1) {
@@ -64,6 +65,21 @@ object DiagnosticsPerformanceMonitor {
             override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) = Unit
             override fun onActivityDestroyed(activity: Activity) = Unit
         })
+    }
+
+    /**
+     * The sampler thread, started on first use rather than only in [install].
+     *
+     * DiagnosticsLog.snapshot posts its system-state collection here (#82), and the first of those
+     * calls happens in Application.onCreate — before install runs. The thread must therefore exist
+     * for any caller holding an application Context, which also covers the lightweight diagnostics
+     * process, where install never runs. Idempotent; safe from any thread.
+     */
+    internal fun ensureHandler(context: Context): Handler = synchronized(handlerLock) {
+        handler ?: HandlerThread("anilili-performance", Process.THREAD_PRIORITY_BACKGROUND)
+            .apply { start() }
+            .let { started -> Handler(started.looper).also { created -> handler = created } }
+            .also { appContext = context.applicationContext }
     }
 
     private fun recordSample(context: Context) {
