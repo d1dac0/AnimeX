@@ -721,6 +721,12 @@ private fun WatchContent(
     val pauseDescription = remember(data.anilistId, data.description) {
         data.description?.cleanAniListDescription().orEmpty()
     }
+    // Kept, not filtered at the call: that call sits in the lambda that reads playerControlsVisible,
+    // so every reveal and auto-hide of the TV control row handed PlayerSurface a new list and it
+    // could not skip.
+    val nativeQualityStreams = remember(data.sources.streams) {
+        data.sources.streams.filterNot(StreamItem::isEmbed)
+    }
     // The series' logo for the player's title and pause billing. Keyed on the series alone, so
     // moving to the next episode does not ask again; the tree record is cached for a day anyway.
     val seriesLogo by produceState<String?>(initialValue = null, data.anilistId) {
@@ -1414,7 +1420,7 @@ private fun WatchContent(
                     else -> PlayerSurface(
                         externalPlaybackSession = externalPlaybackSession,
                         stream = stream,
-                        qualityStreams = data.sources.streams.filterNot(StreamItem::isEmbed),
+                        qualityStreams = nativeQualityStreams,
                         subtitles = data.sources.subtitles,
                         subtitleOffsetMs = data.sources.subtitleOffsetMs,
                         skip = data.sources.skip,
