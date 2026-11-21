@@ -844,6 +844,20 @@ object LibraryStore {
         refreshRemoteLibrary()
     }
 
+    /**
+     * The qualifying foreground return (#78): a refresh a player parked is taken now —
+     * [MainActivity.onStart] is one of the "next" moments the skip promised — and when nothing is
+     * parked this is the ordinary return, which runs the plain unforced refresh as it always did.
+     * The park must be cleared before [refreshRemoteLibrary] in either case, because it refuses
+     * unforced calls while parked and a park left over from a player would swallow the ordinary
+     * one. The tab-route entry keeps offering [takeParkedRemoteRefresh], which stays a no-op when
+     * the start already took it.
+     */
+    fun takeOrRunUnforcedRemoteRefresh() {
+        remoteRefreshParked = false
+        refreshRemoteLibrary()
+    }
+
     /** Refresh on cold start/foreground, while bounding AniList's shared API rate limit. */
     @Synchronized
     fun refreshRemoteLibrary(force: Boolean = false) {

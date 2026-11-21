@@ -506,7 +506,10 @@ class MainActivity : FragmentActivity() {
             // built once the link is processed, but the destination kind is known here.
             ?: Routes.WATCH.takeIf { pendingLink is AnililiLink.Watch }
         if (shouldRefreshOnStart(route, sessionActive)) {
-            LibraryStore.takeParkedRemoteRefresh()
+            // A qualifying start takes a player's parked refresh and otherwise refreshes as an
+            // ordinary return always did (#78) — takeParkedRemoteRefresh alone would no-op when
+            // nothing was parked and silently stop the everyday refresh.
+            LibraryStore.takeOrRunUnforcedRemoteRefresh()
         } else {
             LibraryStore.parkUnforcedRemoteRefresh()
             DiagnosticsLog.event(
