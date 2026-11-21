@@ -86,7 +86,6 @@ fun DownloadedEpisodeScreen(
     val device = LocalAppDeviceProfile.current
     val downloads by EpisodeDownloads.downloads(context).collectAsState()
     val exported by EpisodeExport.exported(context).collectAsState()
-    val historyEntries by LibraryStore.history.collectAsState()
     // Next/previous switch episodes in place, so the route argument is only the initial episode.
     var currentDownloadId by remember(downloadId) { mutableStateOf(downloadId) }
     val download = downloads.firstOrNull { it.id == currentDownloadId }
@@ -204,10 +203,17 @@ fun DownloadedEpisodeScreen(
             )
         }
     }
+    // Its own list, kept: a fresh map each recomposition was a new argument PlayerSurface could
+    // never skip over.
+    val drawerItems = remember(drawerEpisodes) { drawerEpisodes.map { it.second } }
     val currentDrawerIndex = drawerEpisodes.indexOfFirst { (episode, _) -> episode.id == currentDownloadId }
     val metadataNumber = playable?.metadata?.episodeNumber?.trim()?.toDoubleOrNull()
-    val currentHistory = playable?.metadata?.let { metadata ->
-        historyEntries.firstOrNull { it.anilistId == metadata.anilistId }
+    // Read once per episode, not collected: this screen's own progress save rewrites history every
+    // eight seconds, and collecting it recomposed the whole of PlayerSurface each time with a new
+    // history row and start position it had no use for mid-episode. The store is loaded in
+    // Application.onCreate, so the read is never ahead of it.
+    val currentHistory = remember(currentDownloadId, playable?.metadata?.anilistId) {
+        playable?.metadata?.anilistId?.let(LibraryStore::historyFor)
     }
     val resumePositionMs = if (playable != null && metadataNumber != null) {
         offlineResumePosition(
@@ -375,7 +381,7 @@ fun DownloadedEpisodeScreen(
                     onToggleFullscreen = if (device.isTv) null else leave,
                     startPositionMs = resumePositionMs,
                     notificationRoute = Routes.download(currentDownloadId),
-                    episodes = drawerEpisodes.map { it.second },
+                    episodes = drawerItems,
                     currentIndex = currentDrawerIndex.coerceAtLeast(0),
                     historyEntry = currentHistory,
                     onSelectEpisode = if (currentDrawerIndex >= 0) {

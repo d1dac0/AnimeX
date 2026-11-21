@@ -45,7 +45,6 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -147,7 +146,6 @@ import com.anilili.data.reminder.ReleaseSyncScheduler
 import com.anilili.data.remote.FlixcloudBridge
 import com.anilili.data.remote.HanimeBridge
 import com.anilili.data.remote.PaheBridge
-import com.anilili.data.remote.PipeBridge
 import com.anilili.data.remote.canHostPipeEngine
 import com.anilili.data.settings.MenuLanguage
 import com.anilili.data.settings.SettingsStore
@@ -165,7 +163,6 @@ import com.anilili.playback.playableOfflineEpisodeId
 import com.anilili.playback.supportsMiniPlayer
 import com.anilili.ui.AllAnimeCaptchaHost
 import com.anilili.ui.CloudflareChallengeHost
-import com.anilili.ui.FirstContent
 import com.anilili.ui.FlixcloudResolverWebView
 import com.anilili.ui.HanimeResolverWebView
 import com.anilili.ui.PaheResolverWebView
@@ -185,6 +182,7 @@ import com.anilili.ui.adaptive.rememberAppDeviceProfile
 import com.anilili.ui.adaptive.rememberFocusFill
 import com.anilili.ui.adaptive.rememberTvFocusTarget
 import com.anilili.ui.adaptive.rememberTvRefreshRequest
+import com.anilili.ui.adaptive.shouldUseLowCostTvEffects
 import com.anilili.ui.adaptive.tvFocusHandoff
 import com.anilili.ui.announce.AnnouncementHost
 import com.anilili.ui.components.DefaultNavEnter
@@ -230,6 +228,7 @@ import com.anilili.ui.settings.UpdatePromptHost
 import com.anilili.ui.theme.MiruroTheme
 import com.anilili.ui.watch.DownloadedEpisodeScreen
 import com.anilili.ui.watch.WatchScreen
+import com.anilili.ui.watch.episodeToHandBack
 import java.time.LocalTime
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
@@ -289,6 +288,30 @@ class MainActivity : FragmentActivity() {
             com.anilili.ui.profiles.ProfilesUi.showPicker(atLaunch = true)
         }
         DiagnosticsLog.event("MainActivity pendingRoute=${pendingRoute ?: "none"}")
+        // Taken now, before the root consumes the route or link: a launch aimed at an episode (the
+        // launcher's Watch Next card, an anilili://watch link) starts its player underneath the
+        // intro straight away, and the intro's own ExoPlayer would then compete with it for the
+        // decoder on a single-decoder stick, both soundtracks playing. Low-memory boxes get the
+        // mark for the same reason the rest of the app takes its low-cost path on them.
+        val launchHasDestination = pendingRoute != null || pendingLink != null
+        val launchActivityManager = getSystemService(ACTIVITY_SERVICE) as? android.app.ActivityManager
+        val launchLowCostTv = shouldUseLowCostTvEffects(
+            isTv = BuildConfig.FLAVOR == "tv",
+            isLowRamDevice = launchActivityManager?.isLowRamDevice == true,
+            memoryClassMb = launchActivityManager?.memoryClass,
+        )
+        val videoIntroAllowed = videoLaunchIntroAllowed(
+            tvFlavor = BuildConfig.FLAVOR == "tv",
+            profileSwitchLaunch = profileSwitchLaunch,
+            launchHasDestination = launchHasDestination,
+            lowCostTv = launchLowCostTv,
+        )
+        if (BuildConfig.FLAVOR == "tv" && !videoIntroAllowed) {
+            DiagnosticsLog.event(
+                "Video intro skipped profileSwitch=$profileSwitchLaunch " +
+                    "destination=$launchHasDestination lowCostTv=$launchLowCostTv",
+            )
+        }
         openAnnouncement(intent)
         applyBenchmarkPin(intent)
         handleAuthRedirect(intent)
@@ -352,10 +375,9 @@ class MainActivity : FragmentActivity() {
                             // The TV flavor's video intro can be turned off in Settings. Settings load
                             // asynchronously, so the choice waits for them rather than starting one
                             // intro and swapping to the other; the mobile flavor has only the mark.
+                            // See videoLaunchIntroAllowed for the launches that never get the video.
                             val videoIntro by produceState<Boolean?>(
-                                // A profile switch restarts the app; the viewer has just seen the
-                                // intro and is waiting on their profile, not on a second one.
-                                initialValue = if (BuildConfig.FLAVOR == "tv" && !profileSwitchLaunch) null else false,
+                                initialValue = if (videoIntroAllowed) null else false,
                             ) {
                                 if (value == null) {
                                     value = withTimeoutOrNull(LaunchIntroSettingsWaitMillis) {
@@ -842,28 +864,13 @@ private fun MiruroRoot(
     }
 
     val context = LocalContext.current
-    val pipeResolverRequired by PipeBridge.resolverRequired.collectAsState()
-    val pipeHumanCheck by PipeBridge.humanCheck.collectAsState()
+    // The Miruro pipe has no WebView in this build (it is a plain HTTP request; see OkHttpPipe),
+    // so nothing here mounts one for PipeBridge or collects its state: with no tab attached, its
+    // challenge watchdog never runs and its human check can never be raised.
     val flixcloudResolverRequired by FlixcloudBridge.resolverRequired.collectAsState()
     val hanimeResolverRequired by HanimeBridge.resolverRequired.collectAsState()
     val paheResolverRequired by PaheBridge.resolverRequired.collectAsState()
     val paheEverUsed by PaheBridge.everUsed.collectAsState()
-    // Constructing a WebView during first composition delays the first visible frame, badly so on
-    // a TV stick. The warm bridge is worth having, but not at the cost of a slower cold start, so
-    // it is stood up once the UI has settled.
-    //
-    // On TV it additionally waits for the first screen to finish loading. A device report caught
-    // the bridge building itself while home's own request was still in flight — AniList was
-    // unreachable on that network and hung for 12 seconds — so two expensive things ran at once
-    // on a box already dropping frames. Nothing waits on the resolver at startup, so it can.
-    val firstContentSettled by FirstContent.settled.collectAsState()
-    var startupGraceElapsed by remember { mutableStateOf(false) }
-    LaunchedEffect(deviceProfile.isTv) {
-        delay(if (deviceProfile.isTv) 6_000 else 2_500)
-        startupGraceElapsed = true
-    }
-    val resolverWebViewsReady =
-        startupGraceElapsed && (!deviceProfile.isTv || firstContentSettled)
     // Read once: the answer is a property of the system image, and the lookup touches the package
     // manager. It deliberately does not start a WebView to ask — see chromiumRestartIsFatal.
     val chromiumCannotRestart = remember(context) { chromiumRestartIsFatal(context) }
@@ -1101,14 +1108,6 @@ private fun MiruroRoot(
                     onDismiss = { showRandomPick = false },
                 )
             }
-            val humanCheckOrigin = pipeHumanCheck
-            if (humanCheckOrigin != null) {
-                PipeHumanCheckBackdrop(
-                    isTv = deviceProfile.isTv,
-                    onDismiss = PipeBridge::dismissHumanCheck,
-                )
-            }
-            // No engine in this build: the pipe is a plain HTTP request now. See [OkHttpPipe].
             if (flixcloudResolverRequired) {
                 FlixcloudResolverWebView()
             }
@@ -1131,72 +1130,26 @@ private fun MiruroRoot(
     }
 }
 
-/** How much room the challenge gets. Cloudflare's checkbox card needs far less, but its managed
- *  variants sometimes add a puzzle, and a clipped one cannot be answered. */
-private val PipeHumanCheckHeight = 420.dp
-
-/**
- * Scrim and explanation sitting behind the pipe's WebView while Cloudflare wants a human.
- *
- * Drawn as a sibling *before* the tab so the copy stays clear of it, rather than wrapping the tab
- * in a dialog — the WebView cannot be moved in the tree without being destroyed and reloaded.
- */
-@Composable
-private fun BoxScope.PipeHumanCheckBackdrop(isTv: Boolean, onDismiss: () -> Unit) {
-    Surface(
-        color = MaterialTheme.colorScheme.scrim.copy(alpha = 0.92f),
-        modifier = Modifier.fillMaxSize(),
-    ) {}
-    Column(
-        horizontalAlignment = Alignment.CenterHorizontally,
-        modifier = Modifier
-            .align(Alignment.TopCenter)
-            .fillMaxWidth()
-            .padding(horizontal = 24.dp)
-            .padding(top = 96.dp),
-    ) {
-        Text(
-            text = "A source wants to check you are human",
-            style = MaterialTheme.typography.titleMedium,
-            color = MaterialTheme.colorScheme.onSurface,
-        )
-        Spacer(Modifier.height(8.dp))
-        Text(
-            text = "Answer it once below and its servers come back. Everything else keeps playing " +
-                "either way.",
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-        if (isTv) {
-            Spacer(Modifier.height(8.dp))
-            Text(
-                // The page eats the arrows to move between its own fields, so Back is the way out.
-                text = "Move with the arrows, select with OK, or press Back to skip.",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
-    }
-    if (!isTv) {
-        val extraFocus1 = rememberFocusFill()
-        TextButton(
-            colors = extraFocus1.buttonColors(ButtonDefaults.textButtonColors()),
-            onClick = onDismiss,
-            modifier = Modifier
-                .align(Alignment.BottomCenter)
-                .padding(bottom = 48.dp).focusFill(extraFocus1, RoundedCornerShape(24.dp)),
-        ) {
-            Text("Not now")
-        }
-    }
-}
-
 /** Frames to keep retrying the rail's initial focus on slow TV boxes before giving up. */
 /**
  * How long the TV launch waits for Settings before picking an intro. The read takes milliseconds;
  * past this the water-fill mark plays rather than keeping the screen blank.
  */
 private const val LaunchIntroSettingsWaitMillis = 1_000L
+
+/**
+ * Whether this launch may play the video intro at all; when it may, the Settings switch still
+ * decides. Only the TV flavour has one. A profile switch restarts the app, and the viewer has just
+ * seen the intro. A launch aimed at a route or link (Watch Next, an `anilili://` link) navigates
+ * underneath the intro at once, and its player would share the decoder with the intro's. A
+ * low-cost television ([shouldUseLowCostTvEffects]) gets the mark rather than a second ExoPlayer.
+ */
+internal fun videoLaunchIntroAllowed(
+    tvFlavor: Boolean,
+    profileSwitchLaunch: Boolean,
+    launchHasDestination: Boolean,
+    lowCostTv: Boolean,
+): Boolean = tvFlavor && !profileSwitchLaunch && !launchHasDestination && !lowCostTv
 
 private const val TV_FOCUS_ATTEMPTS = 10
 
@@ -1926,7 +1879,15 @@ private fun AppNavHost(
                 val id = entry.arguments?.getInt(Routes.Arg.ID) ?: return@composable
                 // Only present when the player sent the viewer here; a page opened from a list has
                 // no episode to single out and opens the way it always has.
-                val returnEpisode = entry.arguments?.getString(Routes.Arg.EPISODE)
+                val arrivalEpisode = entry.arguments?.getString(Routes.Arg.EPISODE)
+                // The route argument is the episode the page was built with; a player started from
+                // this page and left again writes the episode it was actually on into the entry's
+                // saved state, and that wins. Kept rather than consumed: removing it would put the
+                // page back on the stale argument at its next composition. A null written there
+                // (the player was another anime's) clears the argument too.
+                val returnEpisode by entry.savedStateHandle
+                    .getStateFlow(PLAYER_RETURN_EPISODE_KEY, arrivalEpisode)
+                    .collectAsState()
                 LaunchedEffect(id) { DiagnosticsLog.event("Route DETAIL content entered id=$id") }
                 DetailScreen(
                     animeId = id,
@@ -2010,7 +1971,7 @@ private fun AppNavHost(
                     showEpisodeListInitially = showEpisodes,
                     inPictureInPicture = inPictureInPicture,
                     onPictureInPictureReadyChanged = onPictureInPictureReadyChanged,
-                    onBack = {
+                    onBack = { playingEpisode ->
                         // WatchScreen's Back is documented as leaving for the anime page, but that
                         // page is only under the player when the player was opened from it. A
                         // resume from Continue Watching launches Watch straight from a tab, so on
@@ -2019,12 +1980,25 @@ private fun AppNavHost(
                         // it opens on that episode rather than on episode one. A player opened
                         // from the anime page itself keeps its ordinary pop, which lands the same
                         // place without rebuilding it.
-                        val previous = Routes.tabRoute(nav.previousBackStackEntry?.destination?.route)
+                        //
+                        // "The episode just left" is the one on screen, not this route's argument:
+                        // Next and auto-play move on inside the route, so the argument is only
+                        // where the session started.
+                        val previousEntry = nav.previousBackStackEntry
+                        val previous = Routes.tabRoute(previousEntry?.destination?.route)
                         if (device.isTv && previous in Routes.tabRoutes) {
-                            nav.navigate(Routes.detail(watchId, watchEpisode)) {
+                            val handBack = episodeToHandBack(watchId, watchId, watchEpisode, playingEpisode)
+                            nav.navigate(Routes.detail(watchId, handBack)) {
                                 popUpTo(Routes.WATCH) { inclusive = true }
                             }
                         } else {
+                            if (previousEntry?.destination?.route == Routes.DETAIL_DESTINATION) {
+                                val detailId = previousEntry.arguments?.getInt(Routes.Arg.ID)
+                                if (detailId != null) {
+                                    previousEntry.savedStateHandle[PLAYER_RETURN_EPISODE_KEY] =
+                                        episodeToHandBack(detailId, watchId, watchEpisode, playingEpisode)
+                                }
+                            }
                             nav.popBackStack()
                         }
                     },
@@ -2068,6 +2042,12 @@ private fun NavController.navigateTab(route: String) {
         restoreState = restoreTabState
     }
 }
+
+/**
+ * Saved-state key on an anime page's back-stack entry: the episode the player was on when Back
+ * left it for that page. Overrides the entry's `episode` route argument; see [episodeToHandBack].
+ */
+private const val PLAYER_RETURN_EPISODE_KEY = "playerReturnEpisode"
 
 /** Debug builds: update-prompt notes to preview; see MainActivity.applyBenchmarkPin. */
 private const val EXTRA_PREVIEW_CHANGELOG = "com.anilili.debug.PREVIEW_CHANGELOG"

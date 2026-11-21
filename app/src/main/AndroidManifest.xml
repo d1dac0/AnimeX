@@ -59,8 +59,11 @@
     </queries>
 
     <!--
-        largeHeap: the app runs a Compose UI, an ExoPlayer, and up to two WebViews (the resolver
-        bridge and an embed player) in one process. On a Fire TV stick the standard ceiling is
+        largeHeap: the app runs a Compose UI, an ExoPlayer and its WebViews in one process. Two
+        WebViews alive at once is the common case, but on TV up to five can be: the embed player,
+        the Flixcloud resolver, the AnimePahe settle view, the Cloudflare challenge dialog and the
+        AllAnime captcha, and six with adult content on (the Hanime resolver). The Miruro pipe has
+        no WebView any more; it is a plain HTTP request. On a Fire TV stick the standard ceiling is
         192 MB, and a heap-exhaustion OutOfMemoryError lands wherever the next allocation happens
         to be — one crash report died inside a routine SharedPreferences write. Devices flagged
         low-RAM ignore the flag, so it only lifts the ceiling where there is memory to lift it to.
