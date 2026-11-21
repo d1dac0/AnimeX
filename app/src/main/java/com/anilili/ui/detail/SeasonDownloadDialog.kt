@@ -2,6 +2,8 @@ package com.anilili.ui.detail
 
 import android.text.format.Formatter
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -161,9 +163,14 @@ internal fun SeasonDownloadDialog(
     val volumeLabel = remember(saveLocation) { DownloadLocations.volumeLabel(context, saveLocation) }
     // Recomputed per chosen resolution: the estimate, and therefore the warning, depends on it.
     val perEpisodeBytes = remember(quality) { DownloadStorage.estimatedEpisodeBytes(quality.maxHeight) }
-    val selected = selectedDownloadEpisodes(episodes, selectedEpisodeIds, skipFillers)
-    val count = selected.size
-    val fillerCount = episodes.count(EpisodeItem::filler)
+    // Walked once per input change, not on every recomposition: the quality check's Checking state
+    // ticks recompose this dialog several times a second, and filtering every episode each tick is
+    // the O(n) recompute issue #59 called out beside the eager rows.
+    val selection = remember(episodes, selectedEpisodeIds, skipFillers) {
+        seasonDownloadSelection(episodes, selectedEpisodeIds, skipFillers)
+    }
+    val count = selection.selectedCount
+    val fillerCount = selection.fillerCount
     val selectableCount = episodes.size - if (skipFillers) fillerCount else 0
     val allSelected = selectableCount > 0 && count == selectableCount
     val estimatedBytes = perEpisodeBytes * count
@@ -183,8 +190,18 @@ internal fun SeasonDownloadDialog(
     /** Null when one volume holds everything, so the gauge has no second disk to distinguish it from. */
     val gaugeVolume = space.volumeLabel
 
+    // The opening cursor goes to the body's first control, the audio selector (§31). Rows of a
+    // lazy body compose and dispose as it scrolls, and a row that claims the cursor on
+    // composition would re-claim it every time it is composed again on the way back (#59), so
+    // the claim is withdrawn once the host reports the opening cursor has landed.
+    var openingFocusPlaced by remember { mutableStateOf(false) }
     MidnightDialogHost(
         onDismiss = onDismiss,
+        // The body is a lazy list: up to a hundred episode rows per range, 270 or more with a Find
+        // query, used to compose the moment the dialog opened (#59). The list itself opens at the
+        // head, where the claiming control stands.
+        bodyListState = rememberLazyListState(),
+        onBodyFocusPlaced = { openingFocusPlaced = true },
         header = { showClose ->
             MidnightMediaHeader(
                 kicker = "Download episodes",
@@ -209,251 +226,272 @@ internal fun SeasonDownloadDialog(
             MidnightDialogFooter(quietText = "Cancel", onQuiet = onDismiss)
         },
     ) {
-        MidnightSectionLabel("Audio")
-        MidnightUnderlineSelector(
-            options = listOf(Category.SUB, Category.DUB),
-            selected = category,
-            onSelect = onCategoryChange,
-            tabLabel = { if (it == Category.DUB) "Dub" else "Sub" },
-        )
-        MidnightSettingRow(
-            title = "First-choice server",
-            value = serverLabel(preferredProvider),
-            onClick = { serverPickerVisible = true },
-        )
-        MidnightHelper("Applies to this batch. If the server fails, another may be tried with the same sub/dub selection.")
-
-        // Dub has no subtitles to burn in, so the switch would be a control that does nothing.
-        if (category == Category.SUB) {
-            MidnightSettingSwitchRow(
-                title = "Hard subs only",
-                description = "Subtitles burned into the picture, so they show in any player. " +
-                    "Soft-sub servers are skipped, and an episode no hard-sub server has fails.",
-                checked = hardSubsOnly,
-                onCheckedChange = onHardSubsOnlyChange,
+        item(key = "section-audio") {
+            MidnightSectionLabel("Audio")
+            MidnightUnderlineSelector(
+                options = listOf(Category.SUB, Category.DUB),
+                selected = category,
+                onSelect = onCategoryChange,
+                tabLabel = { if (it == Category.DUB) "Dub" else "Sub" },
+                claimInitialFocus = !openingFocusPlaced,
             )
+            MidnightSettingRow(
+                title = "First-choice server",
+                value = serverLabel(preferredProvider),
+                onClick = { serverPickerVisible = true },
+            )
+            MidnightHelper("Applies to this batch. If the server fails, another may be tried with the same sub/dub selection.")
+
+            // Dub has no subtitles to burn in, so the switch would be a control that does nothing.
+            if (category == Category.SUB) {
+                MidnightSettingSwitchRow(
+                    title = "Hard subs only",
+                    description = "Subtitles burned into the picture, so they show in any player. " +
+                        "Soft-sub servers are skipped, and an episode no hard-sub server has fails.",
+                    checked = hardSubsOnly,
+                    onCheckedChange = onHardSubsOnlyChange,
+                )
+            }
         }
 
         // Only bonk and twin publish both today, and a single-shape server has nothing to ask. A
         // selector showing one option would be a control that cannot be wrong and cannot be used.
         // With "Hard subs only" on there is nothing left to choose either.
         if (variantOptions.size > 1 && !hardSubFilter) {
-            MidnightSectionLabel("Subtitles")
-            MidnightUnderlineSelector(
-                options = variantOptions,
-                selected = variant,
-                onSelect = onVariantChange,
-                tabLabel = { it.label },
-            )
-            MidnightHelper(
-                "Hard sub is burned into the picture. Soft sub is a track you can restyle or turn " +
-                    "off, and it is exported beside the MP4.",
-            )
+            item(key = "section-subtitles") {
+                MidnightSectionLabel("Subtitles")
+                MidnightUnderlineSelector(
+                    options = variantOptions,
+                    selected = variant,
+                    onSelect = onVariantChange,
+                    tabLabel = { it.label },
+                    // Not a claimant. Composing everything eagerly used to let the last claiming
+                    // control in body order take the cursor — the quality selector further down,
+                    // below the fold on a television — and a lazy body composes claimants only
+                    // when they scroll in, so "last composed" would depend on the viewport (#59).
+                    // The audio selector claims; these stay put.
+                    claimInitialFocus = false,
+                )
+                MidnightHelper(
+                    "Hard sub is burned into the picture. Soft sub is a track you can restyle or turn " +
+                        "off, and it is exported beside the MP4.",
+                )
+            }
         }
 
         if (episodes.isEmpty()) {
-            MidnightInlineNotice(
-                "Every episode on this list is already in your offline library.",
-                tone = MidnightNoticeTone.SUCCESS,
-            )
+            item(key = "notice-empty-library") {
+                MidnightInlineNotice(
+                    "Every episode on this list is already in your offline library.",
+                    tone = MidnightNoticeTone.SUCCESS,
+                )
+            }
             return@MidnightDialogHost
         }
 
-        MidnightSectionLabel("Quality")
-        MidnightUnderlineSelector(
-            options = DownloadQuality.entries,
-            selected = quality,
-            onSelect = onQualityChange,
-            tabLabel = { if (it == DownloadQuality.BEST) "Best" else it.label },
-        )
-        MidnightHelper("Best available rendition at or below the selected resolution.")
-        // Most servers publish one rendition, and a ceiling can do nothing with one: asking such a
-        // server for 480p downloads its 1080p. Said here, before the download, because afterwards
-        // it reads as the setting being ignored.
-        when (qualityCheck) {
-            null, BatchQualityCheck.Unknown -> Unit
-            BatchQualityCheck.Checking -> MidnightSettingRow(
-                title = "Checking what this server offers…",
-                busy = true,
+        item(key = "section-quality") {
+            MidnightSectionLabel("Quality")
+            MidnightUnderlineSelector(
+                options = DownloadQuality.entries,
+                selected = quality,
+                onSelect = onQualityChange,
+                tabLabel = { if (it == DownloadQuality.BEST) "Best" else it.label },
+                // Not a claimant; see the subtitles selector (#59).
+                claimInitialFocus = false,
             )
-            is BatchQualityCheck.Fits -> MidnightHelper(
-                "${serverLabel(qualityCheck.provider)} will download at ${qualityCheck.height}p " +
-                    "(checked on one episode).",
-            )
-            is BatchQualityCheck.Misses -> {
-                val ladder = qualityCheck.offered.joinToString(" / ") { "${it}p" }
-                MidnightInlineNotice(
-                    if (qualityCheck.offered.size == 1) {
-                        "${serverLabel(qualityCheck.provider)} only has $ladder for episode " +
-                            "${qualityCheck.episodeLabel}, so it would download at $ladder."
-                    } else {
-                        "${serverLabel(qualityCheck.provider)} has $ladder for episode " +
-                            "${qualityCheck.episodeLabel} — no ${quality.label}, so it would " +
-                            "download at ${qualityCheck.delivered}p."
-                    },
-                    tone = MidnightNoticeTone.WARNING,
+            MidnightHelper("Best available rendition at or below the selected resolution.")
+            // Most servers publish one rendition, and a ceiling can do nothing with one: asking such a
+            // server for 480p downloads its 1080p. Said here, before the download, because afterwards
+            // it reads as the setting being ignored.
+            when (qualityCheck) {
+                null, BatchQualityCheck.Unknown -> Unit
+                BatchQualityCheck.Checking -> MidnightSettingRow(
+                    title = "Checking what this server offers…",
+                    busy = true,
                 )
-                val alternative = qualityCheck.alternative
-                when {
-                    alternative != null -> MidnightSettingRow(
-                        title = "Use ${serverLabel(alternative.provider)} instead",
-                        description = "Has ${alternative.height}p for episode ${qualityCheck.episodeLabel}",
-                        value = "Switch",
-                        onClick = { onUseProvider(alternative.provider) },
+                is BatchQualityCheck.Fits -> MidnightHelper(
+                    "${serverLabel(qualityCheck.provider)} will download at ${qualityCheck.height}p " +
+                        "(checked on one episode).",
+                )
+                is BatchQualityCheck.Misses -> {
+                    val ladder = qualityCheck.offered.joinToString(" / ") { "${it}p" }
+                    MidnightInlineNotice(
+                        if (qualityCheck.offered.size == 1) {
+                            "${serverLabel(qualityCheck.provider)} only has $ladder for episode " +
+                                "${qualityCheck.episodeLabel}, so it would download at $ladder."
+                        } else {
+                            "${serverLabel(qualityCheck.provider)} has $ladder for episode " +
+                                "${qualityCheck.episodeLabel} — no ${quality.label}, so it would " +
+                                "download at ${qualityCheck.delivered}p."
+                        },
+                        tone = MidnightNoticeTone.WARNING,
                     )
-                    qualityCheck.searching -> MidnightSettingRow(
-                        title = "Looking for a server with ${quality.label}…",
-                        busy = true,
-                    )
-                    else -> MidnightHelper(
-                        "No other server checked has ${quality.label} for this episode.",
-                    )
+                    val alternative = qualityCheck.alternative
+                    when {
+                        alternative != null -> MidnightSettingRow(
+                            title = "Use ${serverLabel(alternative.provider)} instead",
+                            description = "Has ${alternative.height}p for episode ${qualityCheck.episodeLabel}",
+                            value = "Switch",
+                            onClick = { onUseProvider(alternative.provider) },
+                        )
+                        qualityCheck.searching -> MidnightSettingRow(
+                            title = "Looking for a server with ${quality.label}…",
+                            busy = true,
+                        )
+                        else -> MidnightHelper(
+                            "No other server checked has ${quality.label} for this episode.",
+                        )
+                    }
                 }
             }
-        }
-        if (quality != DownloadQuality.BEST) {
-            MidnightSettingSwitchRow(
-                title = "Switch servers per episode",
-                description = "When an episode's server has no ${quality.label}, try others " +
-                    "for that episode. Slower, and the sub style may differ.",
-                checked = matchQuality,
-                onCheckedChange = onMatchQualityChange,
-            )
+            if (quality != DownloadQuality.BEST) {
+                MidnightSettingSwitchRow(
+                    title = "Switch servers per episode",
+                    description = "When an episode's server has no ${quality.label}, try others " +
+                        "for that episode. Slower, and the sub style may differ.",
+                    checked = matchQuality,
+                    onCheckedChange = onMatchQualityChange,
+                )
+            }
         }
 
-        MidnightSectionLabel("Choose episodes")
-        MidnightSettingSwitchRow(
-            title = "Skip filler episodes",
-            description = if (fillerCount == 0) {
-                "No episodes in this list are marked as filler"
-            } else {
-                "$fillerCount marked as filler"
-            },
-            checked = skipFillers,
-            enabled = fillerCount > 0,
-            onCheckedChange = onSkipFillersChange,
-        )
-        MidnightSelectionRow(
-            title = if (selectableCount == 1) "Select the episode" else "Select all $selectableCount available",
-            subtitle = if (allSelected) "Clear selection" else "Include every episode allowed below",
-            selected = allSelected,
-            onSelectedChange = onSelectAll,
-            claimInitialFocus = false,
-        )
-        episodes.forEach { episode ->
-            val skipped = skipFillers && episode.filler
-            val subtitle = listOfNotNull(
-                episode.distinctTitle,
-                when {
-                    skipped -> "Filler · skipped"
-                    episode.filler -> "Filler"
-                    else -> null
+        item(key = "section-episodes") {
+            MidnightSectionLabel("Choose episodes")
+            MidnightSettingSwitchRow(
+                title = "Skip filler episodes",
+                description = if (fillerCount == 0) {
+                    "No episodes in this list are marked as filler"
+                } else {
+                    "$fillerCount marked as filler"
                 },
-            ).joinToString(" · ").takeIf(String::isNotEmpty)
+                checked = skipFillers,
+                enabled = fillerCount > 0,
+                onCheckedChange = onSkipFillersChange,
+            )
             MidnightSelectionRow(
-                title = "Episode ${episode.displayNumber}",
-                subtitle = subtitle,
-                selected = !skipped && episode.pipeId in selectedEpisodeIds,
-                enabled = !skipped,
+                title = if (selectableCount == 1) "Select the episode" else "Select all $selectableCount available",
+                subtitle = if (allSelected) "Clear selection" else "Include every episode allowed below",
+                selected = allSelected,
+                onSelectedChange = onSelectAll,
+                claimInitialFocus = false,
+            )
+        }
+        items(
+            episodes,
+            key = { it.pipeId },
+            contentType = { SEASON_EPISODE_ROW_CONTENT_TYPE },
+        ) { episode ->
+            val row = seasonEpisodeRow(episode, skipFillers, selectedEpisodeIds)
+            MidnightSelectionRow(
+                title = row.title,
+                subtitle = row.subtitle,
+                selected = row.selected,
+                enabled = row.enabled,
                 onSelectedChange = { checked -> onEpisodeSelected(episode, checked) },
                 trailing = Formatter.formatShortFileSize(context, perEpisodeBytes),
                 claimInitialFocus = false,
             )
         }
         if (count == 0) {
-            MidnightInlineNotice(
-                "Choose at least one episode to start a download.",
-                tone = MidnightNoticeTone.WARNING,
-            )
+            item(key = "notice-empty-selection") {
+                MidnightInlineNotice(
+                    "Choose at least one episode to start a download.",
+                    tone = MidnightNoticeTone.WARNING,
+                )
+            }
         }
-        // Otherwise a season half in the library reads as a wrong count rather than as the skip
-        // it is, and the viewer goes looking for the missing episodes.
-        if (alreadyHeldCount > 0) {
-            MidnightHelper(
-                "$alreadyHeldCount already saved and skipped. Fetched one at a time — you can " +
-                    "keep using the app while it runs.",
-            )
-        } else {
-            MidnightHelper("Fetched one at a time — you can keep using the app while it runs.")
+        item(key = "note-fetch-pace") {
+            // Otherwise a season half in the library reads as a wrong count rather than as the skip
+            // it is, and the viewer goes looking for the missing episodes.
+            if (alreadyHeldCount > 0) {
+                MidnightHelper(
+                    "$alreadyHeldCount already saved and skipped. Fetched one at a time — you can " +
+                        "keep using the app while it runs.",
+                )
+            } else {
+                MidnightHelper("Fetched one at a time — you can keep using the app while it runs.")
+            }
         }
 
-        MidnightSectionLabel("Storage")
-        MidnightStorageStrip(
-            sizeLabel = "≈ ${Formatter.formatShortFileSize(context, estimatedBytes)}",
-            noteLabel = if (count == 1) "1 episode" else "$count episodes",
-            freeLabel = when {
-                space.freeBytes <= 0L -> "Free space unreadable"
-                // Named whenever a second volume is in play, so a figure that does not match the
-                // one the viewer has in mind is at least attributable to a disk.
-                gaugeVolume != null ->
-                    "${Formatter.formatShortFileSize(context, space.freeBytes)} free on $gaugeVolume"
-                else -> "${Formatter.formatShortFileSize(context, space.freeBytes)} free"
-            },
-            afterLabel = when {
-                wontFit -> "${Formatter.formatShortFileSize(
-                    context,
-                    space.neededBytes - space.freeBytes,
-                )} short"
-                space.freeBytes > 0L -> "${Formatter.formatShortFileSize(
-                    context,
-                    (space.freeBytes - space.neededBytes).coerceAtLeast(0L),
-                )} after"
-                else -> ""
-            },
-            fillFraction = if (space.freeBytes > 0L) {
-                space.neededBytes.toFloat() / space.freeBytes
-            } else {
-                0f
-            },
-            blocked = wontFit,
-        )
-        // A stick has a few GB total, so the count is a genuinely useful number there; on a
-        // phone with 200 GB free it would just be noise.
-        if (device.isTv && space.freeBytes > 0L && !wontFit) {
-            MidnightHelper(
-                "Room for about ${space.freeBytes / perEpisodeBytes.coerceAtLeast(1L)} episodes in total",
-            )
-        }
-        when {
-            wontFit -> MidnightInlineNotice(
-                when (space.volume) {
-                    DownloadSpaceVolume.ONLY ->
-                        "Not enough room — choose fewer episodes, a lower resolution, or free " +
-                            "some storage."
-                    DownloadSpaceVolume.SAVE_LOCATION ->
-                        "Not enough room on $volumeLabel — choose fewer episodes, a lower " +
-                            "resolution, or free some storage."
-                    // Otherwise a download bound for a card is refused over the phone's storage
-                    // with nothing on screen to say why the phone has anything to do with it.
-                    DownloadSpaceVolume.LIBRARY_CACHE ->
-                        "Not enough room on $LIBRARY_CACHE_VOLUME_LABEL — episodes are fetched " +
-                            "there before being saved to $locationLabel, so a little room is " +
-                            "needed on both. Free some storage or choose a lower resolution."
+        item(key = "section-storage") {
+            MidnightSectionLabel("Storage")
+            MidnightStorageStrip(
+                sizeLabel = "≈ ${Formatter.formatShortFileSize(context, estimatedBytes)}",
+                noteLabel = if (count == 1) "1 episode" else "$count episodes",
+                freeLabel = when {
+                    space.freeBytes <= 0L -> "Free space unreadable"
+                    // Named whenever a second volume is in play, so a figure that does not match the
+                    // one the viewer has in mind is at least attributable to a disk.
+                    gaugeVolume != null ->
+                        "${Formatter.formatShortFileSize(context, space.freeBytes)} free on $gaugeVolume"
+                    else -> "${Formatter.formatShortFileSize(context, space.freeBytes)} free"
                 },
-                tone = MidnightNoticeTone.ERROR,
-            )
-            tight -> MidnightInlineNotice(
-                if (gaugeVolume != null) {
-                    "${gaugeVolume.replaceFirstChar(Char::uppercase)} is nearly full — the " +
-                        "download may fail part-way or crowd out other apps."
+                afterLabel = when {
+                    wontFit -> "${Formatter.formatShortFileSize(
+                        context,
+                        space.neededBytes - space.freeBytes,
+                    )} short"
+                    space.freeBytes > 0L -> "${Formatter.formatShortFileSize(
+                        context,
+                        (space.freeBytes - space.neededBytes).coerceAtLeast(0L),
+                    )} after"
+                    else -> ""
+                },
+                fillFraction = if (space.freeBytes > 0L) {
+                    space.neededBytes.toFloat() / space.freeBytes
                 } else {
-                    "Storage is nearly full — the download may fail part-way or crowd out other apps."
+                    0f
                 },
-                tone = MidnightNoticeTone.WARNING,
+                blocked = wontFit,
+            )
+            // A stick has a few GB total, so the count is a genuinely useful number there; on a
+            // phone with 200 GB free it would just be noise.
+            if (device.isTv && space.freeBytes > 0L && !wontFit) {
+                MidnightHelper(
+                    "Room for about ${space.freeBytes / perEpisodeBytes.coerceAtLeast(1L)} episodes in total",
+                )
+            }
+            when {
+                wontFit -> MidnightInlineNotice(
+                    when (space.volume) {
+                        DownloadSpaceVolume.ONLY ->
+                            "Not enough room — choose fewer episodes, a lower resolution, or free " +
+                                "some storage."
+                        DownloadSpaceVolume.SAVE_LOCATION ->
+                            "Not enough room on $volumeLabel — choose fewer episodes, a lower " +
+                                "resolution, or free some storage."
+                        // Otherwise a download bound for a card is refused over the phone's storage
+                        // with nothing on screen to say why the phone has anything to do with it.
+                        DownloadSpaceVolume.LIBRARY_CACHE ->
+                            "Not enough room on $LIBRARY_CACHE_VOLUME_LABEL — episodes are fetched " +
+                                "there before being saved to $locationLabel, so a little room is " +
+                                "needed on both. Free some storage or choose a lower resolution."
+                    },
+                    tone = MidnightNoticeTone.ERROR,
+                )
+                tight -> MidnightInlineNotice(
+                    if (gaugeVolume != null) {
+                        "${gaugeVolume.replaceFirstChar(Char::uppercase)} is nearly full — the " +
+                            "download may fail part-way or crowd out other apps."
+                    } else {
+                        "Storage is nearly full — the download may fail part-way or crowd out other apps."
+                    },
+                    tone = MidnightNoticeTone.WARNING,
+                )
+            }
+            // A batch follows the destination preference like any other download — the export runs per
+            // episode once its download finishes, which needs no resolved stream up front. Still worth
+            // stating: this dialog has no destination control of its own, so the setting decides, and
+            // the difference is a viewer finding Downloads/Anilili full or empty an hour later.
+            MidnightInlineNotice(
+                when (downloadDestination) {
+                    DownloadDestination.APP_ONLY -> "Kept in the Anilili offline library."
+                    DownloadDestination.DEVICE_ONLY -> "Saved as MP4 files in $locationLabel."
+                    DownloadDestination.BOTH ->
+                        "Kept in the Anilili library and saved as MP4 files in $locationLabel."
+                },
             )
         }
-        // A batch follows the destination preference like any other download — the export runs per
-        // episode once its download finishes, which needs no resolved stream up front. Still worth
-        // stating: this dialog has no destination control of its own, so the setting decides, and
-        // the difference is a viewer finding Downloads/Anilili full or empty an hour later.
-        MidnightInlineNotice(
-            when (downloadDestination) {
-                DownloadDestination.APP_ONLY -> "Kept in the Anilili offline library."
-                DownloadDestination.DEVICE_ONLY -> "Saved as MP4 files in $locationLabel."
-                DownloadDestination.BOTH ->
-                    "Kept in the Anilili library and saved as MP4 files in $locationLabel."
-            },
-        )
     }
 }
 
