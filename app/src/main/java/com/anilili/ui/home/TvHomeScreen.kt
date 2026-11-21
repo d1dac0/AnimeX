@@ -792,15 +792,17 @@ internal fun TvMediaRail(
     // the node.
     val railIdentity = media.firstOrNull()?.id
     val railKey = "media:$title:${railIdentity ?: -1}"
-    var lastFocusedIndex by remember(railIdentity) { mutableIntStateOf(TvFocusMemory.indexOf(railKey)) }
+    var lastFocusedIndex by remember(railIdentity) {
+        mutableIntStateOf(TvFocusMemory.indexOf(railKey, media.map(Media::id)))
+    }
     val itemFocusTargets = remember(railIdentity, media.size) { List(media.size) { TvFocusTarget() } }
     val railState = rememberTvRailState()
 
     // Back from a show returns to the row and the card the viewer opened it from, not to the first
     // card of the first rail. Consumed once, so a later recomposition does not drag the cursor back.
+    // Found by the title's id, so a revalidation that reordered the rail still lands on it.
     LaunchedEffect(railKey) {
-        val restore = TvFocusMemory.consumeRestore(railKey) ?: return@LaunchedEffect
-        val index = restore.coerceIn(0, media.lastIndex.coerceAtLeast(0))
+        val index = TvFocusMemory.consumeRestore(railKey, media.map(Media::id)) ?: return@LaunchedEffect
         railState.scrollToItem(index)
         withFrameNanos { }
         itemFocusTargets.getOrNull(index)
@@ -852,13 +854,13 @@ internal fun TvMediaRail(
                         media = item,
                         onClick = {
                             // Leaving for the title's page: Back restores this card.
-                            TvFocusMemory.arm(railKey, index)
+                            TvFocusMemory.arm(railKey, index, item.id)
                             onAnimeClick(item.id)
                         },
                         onFocused = { focused ->
                             if (focused) {
                                 lastFocusedIndex = index
-                                TvFocusMemory.focused(railKey, index)
+                                TvFocusMemory.focused(railKey, index, item.id)
                                 onPreview(item)
                             }
                         },
@@ -1111,14 +1113,15 @@ internal fun TvContinueRail(
             entry = entry,
             onDismiss = { managedEntry = null },
             onOpenDetails = {
-                TvFocusMemory.arm(railKey, history.indexOfFirst { it.anilistId == entry.anilistId }.coerceAtLeast(0))
+                val index = history.indexOfFirst { it.anilistId == entry.anilistId }.coerceAtLeast(0)
+                TvFocusMemory.arm(railKey, index, entry.anilistId)
                 onOpenDetails(entry)
             },
         )
     }
 
     val historyIds = history.map(HistoryEntry::anilistId)
-    var lastFocusedIndex by remember(historyIds) { mutableIntStateOf(TvFocusMemory.indexOf(railKey)) }
+    var lastFocusedIndex by remember(historyIds) { mutableIntStateOf(TvFocusMemory.indexOf(railKey, historyIds)) }
     val itemFocusTargets = remember(historyIds) { List(history.size) { TvFocusTarget() } }
     // Each card's info button: Up from a card goes there before it leaves the rail.
     val actionRequesters = remember(historyIds) { List(history.size) { FocusRequester() } }
@@ -1126,10 +1129,10 @@ internal fun TvContinueRail(
     val railState = rememberContinueRailState(history.firstOrNull()?.anilistId, rememberTvRailState())
 
     // The player's Back lands here when playback started from this row, so the cursor goes back to
-    // the card it started from — see TvFocusMemory.
+    // the card it started from — see TvFocusMemory. By title, not position: playback moves the show
+    // just watched to the front, so its old index now holds a different show.
     LaunchedEffect(railKey) {
-        val restore = TvFocusMemory.consumeRestore(railKey) ?: return@LaunchedEffect
-        val index = restore.coerceIn(0, history.lastIndex.coerceAtLeast(0))
+        val index = TvFocusMemory.consumeRestore(railKey, historyIds) ?: return@LaunchedEffect
         railState.scrollToItem(index)
         withFrameNanos { }
         itemFocusTargets.getOrNull(index)
@@ -1172,12 +1175,12 @@ internal fun TvContinueRail(
                         nextRelease = nextReleases[entry.anilistId],
                         onClick = {
                             // Leaving for the player: Back restores this card.
-                            TvFocusMemory.arm(railKey, index)
+                            TvFocusMemory.arm(railKey, index, entry.anilistId)
                             onResume(entry)
                         },
                         onLongClick = { managedEntry = entry },
                         onOpenDetails = {
-                            TvFocusMemory.arm(railKey, index)
+                            TvFocusMemory.arm(railKey, index, entry.anilistId)
                             onOpenDetails(entry)
                         },
                         onRemove = { LibraryStore.removeHistory(entry.anilistId, dismissRemoteSeed = true) },
@@ -1187,7 +1190,7 @@ internal fun TvContinueRail(
                         onFocused = { focused ->
                             if (focused) {
                                 lastFocusedIndex = index
-                                TvFocusMemory.focused(railKey, index)
+                                TvFocusMemory.focused(railKey, index, entry.anilistId)
                             }
                         },
                         modifier = Modifier
