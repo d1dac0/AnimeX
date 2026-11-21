@@ -194,6 +194,7 @@ fun EmbedWebView(
     /** The FILLER tag and its skip; null when this episode is not filler. */
     fillerSkip: PlayerFillerSkip? = null,
 ) {
+    DisposableEffect(Unit) { com.anilili.playback.PlaybackStatus.embedMounted(); onDispose { com.anilili.playback.PlaybackStatus.embedUnmounted() } }
     val device = LocalAppDeviceProfile.current
     val playerGestures by SettingsStore.playerGestures.collectAsState()
     val playerSeekGesture by SettingsStore.playerSeekGesture.collectAsState()

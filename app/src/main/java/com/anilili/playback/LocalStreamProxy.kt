@@ -207,6 +207,8 @@ internal object LocalStreamProxy {
             appContext?.let { context ->
                 context.stopService(LocalStreamProxyService.intent(context))
             }
+            // Twenty minutes with nothing fetched: the other player is done with the hand-off.
+            PlaybackStatus.externalHandOffEnded()
             DiagnosticsLog.event("LocalStreamProxy closed after $IDLE_SHUTDOWN_MS ms idle")
             return
         }
