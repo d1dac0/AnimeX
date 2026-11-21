@@ -5,7 +5,6 @@ package com.anilili.ui.home
 import android.os.SystemClock
 import com.anilili.ui.theme.appCanvasFade
 import com.anilili.ui.theme.hasAppBackdrop
-import com.anilili.ui.theme.appCanvas
 import com.anilili.ui.components.SeriesLogo
 import com.anilili.ui.components.ShrinkingTitle
 import com.anilili.data.settings.SettingsStore
@@ -493,8 +492,10 @@ internal fun TvHomeContent(
             modifier = modifier
                 .tvFocusTarget(primaryActionFocusTarget)
                 .focusRequester(listFocus)
-                .fillMaxSize()
-                .appCanvas(),
+                .fillMaxSize(),
+            // The list does not paint the app's canvas itself (#48): the window-level appCanvas
+            // in MainActivity already fills everything behind it, so this one was a second slice
+            // of the same picture drawn on every frame before any content.
             // With no hero the first rail would sit under the floating bar, and Up from it found
             // nothing above: the bar, and with it Search and Settings, could not be reached.
             contentPadding = PaddingValues(top = tvHomeListTopPadding(hasHero = hasHero), bottom = 40.dp),
@@ -691,6 +692,8 @@ private fun TvHero(
             // than sliding its artwork under the clock and settings icons.
             posterTopPadding = 62,
             wideArtwork = backdrop,
+            // (#48) The cheap boxes skip the offscreen layer, the mask and the ambient blur.
+            lowCostTvEffects = lowCostTvEffects,
         )
         // Faded into the page's own canvas, not black, so the Dark background meets the hero
         // without a seam where the artwork ends.
@@ -707,7 +710,7 @@ private fun TvHero(
         // picture now starts about where the text ends (see heroPictureGeometry), and the old
         // stops — still 55% dark at 60% across — shaded the left third of it.
         Box(
-            Modifier.matchParentSize().appCanvasFade { canvas ->
+            Modifier.matchParentSize().appCanvasFade(lowCostTvEffects = lowCostTvEffects) { canvas ->
                 Brush.horizontalGradient(
                     0f to canvas,
                     .40f to canvas.copy(.92f),
@@ -718,7 +721,7 @@ private fun TvHero(
             },
         )
         Box(
-            Modifier.matchParentSize().appCanvasFade { canvas ->
+            Modifier.matchParentSize().appCanvasFade(lowCostTvEffects = lowCostTvEffects) { canvas ->
                 Brush.verticalGradient(
                     0f to canvas.copy(.24f),
                     .58f to Color.Transparent,
