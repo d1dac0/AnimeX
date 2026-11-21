@@ -17,11 +17,8 @@ import com.anilili.MainActivity
 import com.anilili.R
 import com.anilili.data.model.AiringSchedule
 import com.anilili.ui.nav.Routes
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.launch
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.json.Json
@@ -180,7 +177,7 @@ class AiringReminderReceiver : BroadcastReceiver() {
         )
         // Fetching the poster is network work, so the broadcast has to be kept alive for it.
         val pending = goAsync()
-        CoroutineScope(Dispatchers.IO).launch {
+        launchReceiverWork("Airing reminder mediaId=$mediaId episode=$episode", pending::finish) {
             val poster = runCatching { notificationPoster(app, cover) }.getOrNull()
             val notification = NotificationCompat.Builder(app, ReminderManager.CHANNEL_ID)
                 .setSmallIcon(R.drawable.ic_notification)
@@ -198,7 +195,6 @@ class AiringReminderReceiver : BroadcastReceiver() {
             // beside it as a second row for one episode.
             (app.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager)
                 .notify(EpisodeAlertLedger.TAG, EpisodeAlertLedger.notificationId(mediaId, episode), notification)
-            pending.finish()
         }
     }
 }

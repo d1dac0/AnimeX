@@ -31,9 +31,6 @@ import com.anilili.data.settings.SettingsStore
 import com.anilili.diagnostics.DiagnosticsLog
 import com.anilili.ui.nav.Routes
 import java.util.concurrent.TimeUnit
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.json.Json
@@ -188,9 +185,6 @@ class AutomaticReleaseReceiver : BroadcastReceiver() {
         val episode = intent.getIntExtra("episode", 0)
         val title = intent.getStringExtra("title") ?: "A saved anime"
         val cover = intent.getStringExtra("cover")
-        // A cold start re-arms this alarm a second before it is marked delivered, and a logged-in
-        // user's AniList poll may already have announced the episode: either way, stay silent.
-        if (!EpisodeAlertLedger.claim(app, mediaId, episode, "local_alarm")) return
         val open = PendingIntent.getActivity(
             app,
             mediaId,
@@ -202,7 +196,12 @@ class AutomaticReleaseReceiver : BroadcastReceiver() {
         )
         // Fetching the poster is network work, so the broadcast has to be kept alive for it.
         val pending = goAsync()
-        CoroutineScope(Dispatchers.IO).launch {
+        launchReceiverWork("Release alert mediaId=$mediaId episode=$episode", pending::finish) {
+            // A cold start re-arms this alarm a second before it is marked delivered, and a
+            // logged-in user's AniList poll may already have announced the episode: either way,
+            // stay silent. The claim commits to disk, so it runs here rather than on Main; it only
+            // has to happen before notify.
+            if (!EpisodeAlertLedger.claim(app, mediaId, episode, "local_alarm")) return@launchReceiverWork
             val poster = runCatching { notificationPoster(app, cover) }.getOrNull()
             val text = "Episode $episode is out"
             val notification = NotificationCompat.Builder(app, AutomaticReleaseManager.CHANNEL_ID)
@@ -233,7 +232,6 @@ class AutomaticReleaseReceiver : BroadcastReceiver() {
                     .setCategory(NotificationCompat.CATEGORY_EVENT)
                     .build(),
             )
-            pending.finish()
         }
     }
 }
