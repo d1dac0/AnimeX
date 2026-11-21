@@ -584,6 +584,9 @@ class MainActivity : FragmentActivity() {
         super.onStop()
         DiagnosticsLog.event("MainActivity.onStop")
         PlaybackService.pauseActivePlayback()
+        // The library encodes and writes its lists off the main thread now (#65); hold the
+        // stop briefly so the last save still lands ahead of Android's queued-write wait.
+        LibraryStore.flushPendingWrites()
     }
 
     override fun onDestroy() {
