@@ -3,6 +3,8 @@ package com.anilili.data.library
 import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.json.Json
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -97,5 +99,86 @@ class LegacyWatchedEpisodesTest {
         assertEquals(entries, seedLegacyWatchedEpisodes(entries, null))
         assertEquals(entries, seedLegacyWatchedEpisodes(entries, "not json"))
         assertEquals(entries, seedLegacyWatchedEpisodes(entries, "[]"))
+    }
+
+    // ---- the one-shot mark (#86) ----
+
+    private fun decode(raw: String) = json.decodeFromString(ListSerializer(HistoryEntry.serializer()), raw)
+
+    @Test
+    fun `not yet seeded, legacy rows are seeded and counted so the store writes them back`() {
+        val raw = withoutWatchedEpisodes(listOf(entry(episodeNumber = 4.0), entry(episodeNumber = 1.0)))
+
+        val seed = seedLegacyHistory(decode(raw), raw, alreadySeeded = false)
+
+        assertEquals(setOf(1.0, 2.0, 3.0), seed.entries[0].watchedEpisodes)
+        assertEquals(2, seed.legacyRows)
+        assertTrue(seed.settled)
+    }
+
+    @Test
+    fun `not yet seeded, a history with no legacy rows settles without anything to write`() {
+        val raw = json.encodeToString(
+            ListSerializer(HistoryEntry.serializer()),
+            listOf(entry(episodeNumber = 7.0)),
+        )
+
+        val seed = seedLegacyHistory(decode(raw), raw, alreadySeeded = false)
+
+        assertEquals(decode(raw), seed.entries)
+        assertEquals(0, seed.legacyRows)
+        assertTrue(seed.settled)
+    }
+
+    /**
+     * The mark is what makes the parse skippable, so with it set even a legacy-shaped string is
+     * not looked at: the entries come back exactly as decoded.
+     */
+    @Test
+    fun `already seeded, the stored json is not read again`() {
+        val raw = withoutWatchedEpisodes(listOf(entry(episodeNumber = 7.0)))
+        val decoded = decode(raw)
+
+        val seed = seedLegacyHistory(decoded, raw, alreadySeeded = true)
+
+        assertEquals(decoded, seed.entries)
+        assertEquals(0, seed.legacyRows)
+        assertTrue(seed.settled)
+    }
+
+    /** Seeding, writing back and loading again is a fixed point: the mark cannot hide a row. */
+    @Test
+    fun `a seeded history written back has nothing left to seed`() {
+        val raw = withoutWatchedEpisodes(listOf(entry(episodeNumber = 5.0)))
+        val firstLoad = seedLegacyHistory(decode(raw), raw, alreadySeeded = false).entries
+        val written = json.encodeToString(ListSerializer(HistoryEntry.serializer()), firstLoad)
+
+        val secondLoad = seedLegacyHistory(decode(written), written, alreadySeeded = false)
+
+        assertEquals(firstLoad, secondLoad.entries)
+        assertEquals(0, secondLoad.legacyRows)
+        assertEquals(
+            secondLoad.entries,
+            seedLegacyHistory(decode(written), written, alreadySeeded = true).entries,
+        )
+    }
+
+    /** A history that could not be checked must be checked again next launch, not marked done. */
+    @Test
+    fun `a history that does not line up with its json never settles`() {
+        val entries = listOf(entry(episodeNumber = 7.0))
+
+        assertFalse(seedLegacyHistory(entries, "not json", alreadySeeded = false).settled)
+        assertFalse(seedLegacyHistory(entries, "[]", alreadySeeded = false).settled)
+        assertFalse(seedLegacyHistory(emptyList(), "garbage", alreadySeeded = false).settled)
+        assertFalse(seedLegacyHistory(entries, null, alreadySeeded = false).settled)
+    }
+
+    @Test
+    fun `an install with no stored history settles at once`() {
+        val seed = seedLegacyHistory(emptyList(), null, alreadySeeded = false)
+
+        assertTrue(seed.settled)
+        assertEquals(0, seed.legacyRows)
     }
 }

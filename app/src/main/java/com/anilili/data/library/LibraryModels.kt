@@ -458,14 +458,59 @@ private const val WATCHED_EPISODES_KEY = "watchedEpisodes"
 internal fun seedLegacyWatchedEpisodes(
     entries: List<HistoryEntry>,
     raw: String?,
-): List<HistoryEntry> {
-    if (entries.isEmpty() || raw.isNullOrBlank()) return entries
-    val stored = runCatching { Json.parseToJsonElement(raw).jsonArray }.getOrNull() ?: return entries
-    if (stored.size != entries.size) return entries
-    return entries.mapIndexed { index, entry ->
+): List<HistoryEntry> = seedLegacyHistory(entries, raw, alreadySeeded = false).entries
+
+/**
+ * What loading the stored history found, for deciding whether the legacy seed ever needs to run
+ * again.
+ *
+ * [settled] means the stored JSON was read in full and every row lined up with [entries], so once
+ * [entries] is written back — with `encodeDefaults`, which writes the key on every row — no stored
+ * row predates [HistoryEntry.watchedEpisodes] and a later seed could not change anything.
+ * [legacyRows] is how many rows had no key; while it is above zero the store must write the
+ * history back before it records the seed as done, or the rows would lose the seed on the next
+ * launch.
+ */
+internal class LegacyHistorySeed(
+    val entries: List<HistoryEntry>,
+    val legacyRows: Int,
+    val settled: Boolean,
+)
+
+/**
+ * [seedLegacyWatchedEpisodes] with what the store needs to stop paying for it.
+ *
+ * The seed builds a second full JSON tree of the history — up to a hundred rows whose watched sets
+ * can run to thousands of entries — on the main thread at every launch, for a migration that has
+ * nothing left to do once the rows are written back (#86). [alreadySeeded] is the store's record
+ * that this happened; with it set nothing is parsed and [entries] come back as they are.
+ *
+ * Nothing on disk is treated as settled only when nothing was decoded either, and a history that
+ * did not decode or does not line up with its JSON is never settled: it is left alone, as before,
+ * and looked at again next launch.
+ */
+internal fun seedLegacyHistory(
+    entries: List<HistoryEntry>,
+    raw: String?,
+    alreadySeeded: Boolean,
+): LegacyHistorySeed {
+    if (alreadySeeded) return LegacyHistorySeed(entries, legacyRows = 0, settled = true)
+    if (raw.isNullOrBlank()) return LegacyHistorySeed(entries, legacyRows = 0, settled = entries.isEmpty())
+    val unsettled = LegacyHistorySeed(entries, legacyRows = 0, settled = false)
+    if (entries.isEmpty()) return unsettled
+    val stored = runCatching { Json.parseToJsonElement(raw).jsonArray }.getOrNull() ?: return unsettled
+    if (stored.size != entries.size) return unsettled
+    var legacyRows = 0
+    val seeded = entries.mapIndexed { index, entry ->
         val written = stored[index] as? JsonObject
-        if (written == null || WATCHED_EPISODES_KEY in written) entry else entry.seededWatchedEpisodes()
+        if (written == null || WATCHED_EPISODES_KEY in written) {
+            entry
+        } else {
+            legacyRows++
+            entry.seededWatchedEpisodes()
+        }
     }
+    return LegacyHistorySeed(seeded, legacyRows, settled = stored.all { it is JsonObject })
 }
 
 /** Every whole episode below the one in progress. A row on episode 1 has nothing to seed. */
