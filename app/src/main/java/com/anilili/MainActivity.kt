@@ -134,6 +134,7 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
+import com.anilili.data.AppGraph
 import com.anilili.data.ProviderBenchmark
 import com.anilili.data.announce.AnnouncementManager
 import com.anilili.data.auth.AuthManager
@@ -651,7 +652,10 @@ class MainActivity : FragmentActivity() {
     override fun onStop() {
         super.onStop()
         DiagnosticsLog.event("MainActivity.onStop")
-        PlaybackService.pauseActivePlayback()
+        // #61: television parks the episode — pause, then stop — so the decoder and the buffer go
+        // with the screen instead of holding behind Home or the screensaver; phones keep the
+        // loaded pause that powers the notification's resume and the mini player.
+        PlaybackService.pauseOrParkActivePlayback(AppGraph.isTv)
         // The library encodes and writes its lists off the main thread now (#65); hold the
         // stop briefly so the last save still lands ahead of Android's queued-write wait.
         LibraryStore.flushPendingWrites()

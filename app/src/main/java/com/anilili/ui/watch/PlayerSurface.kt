@@ -3116,6 +3116,11 @@ private fun togglePlayerPlayback(controller: MediaController): Boolean {
         // `play()` on its own does nothing at all. Starting again from the top is what the button
         // means there, and it is what Media3's own play/pause handling does.
         if (controller.playbackState == Player.STATE_ENDED) controller.seekToDefaultPosition()
+        // A parked player (#61) is idle but still holds its item; prepare() revives it where it
+        // stopped. play() alone does nothing from idle — without this, Play after Home was dead.
+        if (playerTogglePreparesWhenIdle(controller.playbackState, controller.currentMediaItem != null)) {
+            controller.prepare()
+        }
         controller.play()
     } else {
         controller.pause()
@@ -3133,6 +3138,17 @@ private fun togglePlayerPlayback(controller: MediaController): Boolean {
  */
 internal fun playerToggleWillPlay(playWhenReady: Boolean, playbackState: Int = Player.STATE_READY): Boolean =
     playbackState == Player.STATE_ENDED || !playWhenReady
+
+/**
+ * Whether pressing play on an idle player needs prepare() before play() (#61).
+ *
+ * A parked player — television exits pause, then stop ([com.anilili.playback.shouldParkPlaybackOnExit]) —
+ * sits in STATE_IDLE still holding its item, and `play()` alone does nothing from idle. An idle
+ * player with nothing held must not prepare: there is nothing to revive, and the queue it would
+ * build belongs to the next setMediaItem.
+ */
+internal fun playerTogglePreparesWhenIdle(playbackState: Int, hasMediaItem: Boolean): Boolean =
+    playbackState == Player.STATE_IDLE && hasMediaItem
 
 /** Whether the player is drawing a frame the viewer can see — see the effect that reports it. */
 internal fun playerShowsPicture(playbackState: Int): Boolean =
@@ -3241,9 +3257,9 @@ internal fun VideoSize.contentAspectRatio(): Float =
  * This is PlayerView's job and PlayerView drops it: `onVideoSizeChanged` returns without doing
  * anything while the player sits in `STATE_IDLE`, and a size that arrives in that window is never
  * asked for again — the player only re-emits when the size *changes*, and it does not change on the
- * way from idle to playing. Leaving the TV player runs `stop()` and `clearMediaItems()`, which is
- * exactly that state, so the fresh PlayerView built on the way back in reads whatever shape the
- * controller happened to be holding mid-reset and keeps it for the whole episode.
+ * way from idle to playing. Leaving the TV player parks the episode — pause, then stop (#61) —
+ * which is exactly that state, so the fresh PlayerView built on the way back in reads whatever
+ * shape the controller happened to be holding mid-reset and keeps it for the whole episode.
  *
  * The captions are what shows it. `exo_subtitles` is a child of `exo_content_frame`, not a sibling,
  * so the aspect-ratio frame's height *is* the subtitle canvas's height — and media3 derives the

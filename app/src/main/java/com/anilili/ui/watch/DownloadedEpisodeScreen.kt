@@ -92,7 +92,10 @@ fun DownloadedEpisodeScreen(
     val exportedEpisode = exported.firstOrNull { it.downloadId == currentDownloadId }
     var playbackError by remember(currentDownloadId) { mutableStateOf<AnililiFailure?>(null) }
     val leave = {
-        PlaybackService.pauseActivePlayback()
+        // #61: television parks — pause, then stop — so the codec and the buffer are released for
+        // whatever the viewer browses next; the phone keeps the loaded pause for the notification's
+        // resume. Re-entering the episode re-prepares from the committed position either way.
+        PlaybackService.pauseOrParkActivePlayback(AppGraph.isTv)
         onBack()
     }
     val autoplay by SettingsStore.autoplay.collectAsState()
@@ -100,7 +103,7 @@ fun DownloadedEpisodeScreen(
 
     BackHandler(onBack = leave)
     DisposableEffect(Unit) {
-        onDispose { PlaybackService.pauseActivePlayback() }
+        onDispose { PlaybackService.pauseOrParkActivePlayback(AppGraph.isTv) }
     }
 
     LaunchedEffect(Unit) {

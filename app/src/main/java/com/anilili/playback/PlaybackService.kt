@@ -114,6 +114,15 @@ internal class PlaybackCacheBypassGate {
 }
 
 /**
+ * How leaving a player screen hands playback over (#61): television parks the player — pause,
+ * then stop, so the codec and the buffer are not held behind the screen just left — and every
+ * other form factor keeps the loaded pause that powers the notification's resume and the mini
+ * player. Callers hand in AppGraph's `isTv`, the same signal the rest of the non-UI layers
+ * throttle by.
+ */
+internal fun shouldParkPlaybackOnExit(isTv: Boolean): Boolean = isTv
+
+/**
  * Owns the app playback player so playback survives activity backgrounding and exposes Android
  * notification, lock-screen, headset, Bluetooth, and Cast controls through a MediaSession.
  */
@@ -1041,8 +1050,8 @@ class PlaybackService : MediaSessionService() {
         private var suppressMediaButtonResume = false
 
         /**
-         * Set when [pauseActivePlayback] stopped playback that was actually running, and cleared by
-         * the next player surface that re-attaches to the still-loaded item.
+         * Set when [pauseActivePlayback] or [parkActivePlayback] stopped playback that was actually
+         * running, and cleared by the next player surface that re-attaches to the still-loaded item.
          *
          * The player screen and the loaded media have separate lifetimes: leaving the screen pauses
          * but keeps the item, so re-entering resumes in place. Without this flag that re-entry could
@@ -1069,6 +1078,43 @@ class PlaybackService : MediaSessionService() {
             // The media stays loaded so the notification can resume it, but stray media-button
             // events (Bluetooth reconnects) must not restart it while the app is away.
             suppressMediaButtonResume = true
+        }
+
+        /**
+         * Parks the loaded episode: pause, then stop (#61).
+         *
+         * A paused player stays READY, holding its codecs and its downloaded buffer for as long
+         * as the viewer browses — on a television that is the whole cost of an episode spent on a
+         * screen nobody is watching. `stop()` is what releases them; Media3 keeps the playlist and
+         * the position through it, so re-entering the episode re-prepares from where it stopped
+         * (PlayerSurface's reattachingToLoadedItem path) and in-app Play revives it with a prepare
+         * (PlayerSurface's playerTogglePreparesWhenIdle). The pause first is what stops the sound
+         * the instant the screen leaves and leaves `playWhenReady` deterministically false for the
+         * parked player. The loaded-session notification resume is given up with it — a television
+         * has no notification to resume from, and media-key resume is suppressed here exactly as
+         * it is for a pause. A receiver mid-cast is skipped, as [pauseActivePlayback] skips it.
+         */
+        fun parkActivePlayback() {
+            DiagnosticsLog.event("PlaybackService.parkActivePlayback")
+            val active = activePlayer ?: return
+            if (active.deviceInfo.playbackType == DeviceInfo.PLAYBACK_TYPE_REMOTE) {
+                DiagnosticsLog.event("PlaybackService.parkActivePlayback skipped remote route")
+                return
+            }
+            if (active.playWhenReady) involuntaryPause.set(true)
+            active.pause()
+            active.stop()
+            suppressMediaButtonResume = true
+        }
+
+        /**
+         * The lifecycle-facing way to leave playback: parks on television, pauses everywhere else
+         * ([shouldParkPlaybackOnExit]). Callers hand in [AppGraph.isTv] so the policy stays one
+         * decision, made the same way from the watch screen, the downloaded-episode screen and the
+         * activity's own stop.
+         */
+        fun pauseOrParkActivePlayback(isTv: Boolean) {
+            if (shouldParkPlaybackOnExit(isTv)) parkActivePlayback() else pauseActivePlayback()
         }
 
         /** The app is visible again (or playback deliberately restarted): buttons act normally. */
