@@ -1299,6 +1299,11 @@ fun EmbedWebView(
             onDispose {}
         } else {
             val activity = context.findActivity()
+            // pauseTimers() is process-wide, so a pause this observer made must not outlive it:
+            // were the player to leave while the app sits in the background, the ON_START that
+            // would have answered it never reaches this observer, and every other WebView in the
+            // app — resolvers, challenge dialogs, the login page — would stay frozen.
+            var timersPaused = false
             val observer = LifecycleEventObserver { _, event ->
                 when (event) {
                     // Shrinking into the mini player pauses the activity too, and by the time
@@ -1310,22 +1315,31 @@ fun EmbedWebView(
                         dispatchWebPlayerCommand(web, "pause", fallbackScript = PAUSE_VIDEO_JS)
                         web.onPause()
                         web.pauseTimers()
+                        timersPaused = true
                     }
                     Lifecycle.Event.ON_STOP -> {
                         dispatchWebPlayerCommand(web, "pause", fallbackScript = PAUSE_VIDEO_JS)
                         web.onPause()
                         web.pauseTimers()
+                        timersPaused = true
                     }
                     Lifecycle.Event.ON_RESUME,
                     Lifecycle.Event.ON_START -> {
                         web.resumeTimers()
+                        timersPaused = false
                         web.onResume()
                     }
                     else -> Unit
                 }
             }
             owner.lifecycle.addObserver(observer)
-            onDispose { owner.lifecycle.removeObserver(observer) }
+            onDispose {
+                owner.lifecycle.removeObserver(observer)
+                if (timersPaused) {
+                    DiagnosticsLog.event("EmbedWebView resume timers on dispose")
+                    web.resumeTimers()
+                }
+            }
         }
     }
 
@@ -3729,7 +3743,13 @@ private fun stopWebPlayback(webView: WebView) {
     DiagnosticsLog.event("EmbedWebView stop playback url=${webView.url ?: "none"}")
     dispatchWebPlayerCommand(webView, "pause", fallbackScript = PAUSE_VIDEO_JS)
     webView.onPause()
-    webView.pauseTimers()
+    // No pauseTimers() here. It is process-wide: it stopped JavaScript timers in every WebView the
+    // app owns — the Pahe, Flixcloud and Hanime resolvers, both challenge dialogs and the login
+    // page — and the only resumeTimers() lived in a mounted embed's lifecycle observer, so after
+    // backing out of an embed episode those stalled until the next embed opened (Pahe's clearance
+    // timed out into its cooldown, Flixcloud hit its TV timeout). onPause(), about:blank and the
+    // destroy() that follows already stop this page; the global pair belongs to the lifecycle
+    // observer alone, where the app going to the background is the reason for it.
     webView.stopLoading()
     webView.loadUrl("about:blank")
 }

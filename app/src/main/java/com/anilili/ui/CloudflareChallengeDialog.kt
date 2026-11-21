@@ -132,6 +132,9 @@ private fun CloudflareWebView(
         modifier = Modifier.fillMaxSize().focusProperties { canFocus = true },
         factory = { context ->
             WebView(context).apply {
+                // Timers are paused process-wide, never per view; a pause left behind by the
+                // embed player would freeze the challenge script.
+                resumeTimers()
                 setOnKeyListener { _, keyCode, event ->
                     if (keyCode == KeyEvent.KEYCODE_BACK && event.action == KeyEvent.ACTION_UP) {
                         currentOnCancel()

@@ -25,6 +25,9 @@ fun FlixcloudResolverWebView() {
                 DiagnosticsLog.event("FlixcloudResolverWebView factory create WebView start")
                 DiagnosticsLog.webViewPackage("FlixcloudResolverWebView factory")
                 WebView(ctx).also {
+                    // Timers are paused process-wide, never per view; a pause left behind by the
+                    // embed player would stall this resolver until it timed out.
+                    it.resumeTimers()
                     it.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
                     it.isFocusable = false
                     it.isClickable = false

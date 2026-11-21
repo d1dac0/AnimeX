@@ -568,6 +568,9 @@ fun LoginWebView(
                             var tokenHandled = false
                             WebView(ctx).apply {
                             webView = this
+                            // Timers are paused process-wide, never per view; a pause left behind
+                            // by the embed player would stall the login page's scripts.
+                            resumeTimers()
                             // AndroidView leaves a view at WRAP_CONTENT, and a WebView whose
                             // height is wrap-content lays the page out zero pixels tall: `100vh`
                             // and `height:100%` resolve to 0. Discord sizes its whole login on

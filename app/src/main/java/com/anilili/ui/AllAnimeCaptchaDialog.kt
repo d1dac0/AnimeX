@@ -132,6 +132,9 @@ private fun CaptchaWebView(
         modifier = Modifier.fillMaxSize().focusProperties { canFocus = true },
         factory = { context ->
             WebView(context).apply {
+                // Timers are paused process-wide, never per view; a pause left behind by the
+                // embed player would freeze the check's script.
+                resumeTimers()
                 // A WebView that has focus consumes Back itself. Give the remote its way out
                 // before the key ever reaches Compose.
                 setOnKeyListener { _, keyCode, event ->
