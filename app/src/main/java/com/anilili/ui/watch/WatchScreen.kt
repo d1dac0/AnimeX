@@ -230,7 +230,11 @@ fun WatchScreen(
     showEpisodeListInitially: Boolean = false,
     inPictureInPicture: Boolean = false,
     onPictureInPictureReadyChanged: (Boolean) -> Unit = {},
-    onBack: () -> Unit,
+    /**
+     * Leave the player. The argument is the label of the episode on screen when the viewer left,
+     * which Next and auto-play move away from [episode]; null while nothing has loaded.
+     */
+    onBack: (playingEpisode: String?) -> Unit,
     onOpenAnime: () -> Unit,
     /**
      * True when the previous season's ending moved the player here itself; see
@@ -297,6 +301,11 @@ fun WatchScreen(
     // it starts true to match the controls, which are visible until playback auto-hides them.
     var playerControlsVisible by remember { mutableStateOf(true) }
     val currentOnBack by rememberUpdatedState(onBack)
+    // Next and auto-play change episode inside this route, so the route's own [episode] is only
+    // where the session started; Back hands the anime page the one actually on screen.
+    val currentPlayingEpisode by rememberUpdatedState(
+        (state as? UiState.Success)?.data?.let { it.episodes.getOrNull(it.currentIndex)?.displayNumber },
+    )
     var embeddedPlaybackStopper by remember { mutableStateOf<(() -> Unit)?>(null) }
     val currentEmbeddedPlaybackStopper by rememberUpdatedState(embeddedPlaybackStopper)
     val pictureInPictureReady = state is UiState.Success
@@ -315,7 +324,7 @@ fun WatchScreen(
             currentEmbeddedPlaybackStopper?.invoke()
             vm.commitPlaybackPosition()
             PlaybackService.pauseActivePlayback()
-            currentOnBack()
+            currentOnBack(currentPlayingEpisode)
         }
     }
 
@@ -3261,4 +3270,23 @@ private fun BackButton(onBack: () -> Unit, modifier: Modifier = Modifier) {
             tint = controlFocus16.content(Color.White),
         )
     }
+}
+
+/**
+ * The episode label Back from the player hands to the anime page it lands on.
+ *
+ * Next and auto-play move the player on inside one Watch route, so [routeEpisode] — where the
+ * session started — goes stale; [playingEpisode], the one on screen when the viewer left, wins
+ * whenever there is one. A page for a different anime than the player's ([detailAnimeId] is not
+ * [watchAnimeId]) gets null: an episode label means nothing on another anime's strip, and handing
+ * it nothing also clears whatever label that page arrived with.
+ */
+internal fun episodeToHandBack(
+    detailAnimeId: Int,
+    watchAnimeId: Int,
+    routeEpisode: String?,
+    playingEpisode: String?,
+): String? {
+    if (detailAnimeId != watchAnimeId) return null
+    return playingEpisode?.takeIf { it.isNotBlank() } ?: routeEpisode?.takeIf { it.isNotBlank() }
 }

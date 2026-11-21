@@ -230,6 +230,7 @@ import com.anilili.ui.settings.UpdatePromptHost
 import com.anilili.ui.theme.MiruroTheme
 import com.anilili.ui.watch.DownloadedEpisodeScreen
 import com.anilili.ui.watch.WatchScreen
+import com.anilili.ui.watch.episodeToHandBack
 import java.time.LocalTime
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
@@ -1926,7 +1927,15 @@ private fun AppNavHost(
                 val id = entry.arguments?.getInt(Routes.Arg.ID) ?: return@composable
                 // Only present when the player sent the viewer here; a page opened from a list has
                 // no episode to single out and opens the way it always has.
-                val returnEpisode = entry.arguments?.getString(Routes.Arg.EPISODE)
+                val arrivalEpisode = entry.arguments?.getString(Routes.Arg.EPISODE)
+                // The route argument is the episode the page was built with; a player started from
+                // this page and left again writes the episode it was actually on into the entry's
+                // saved state, and that wins. Kept rather than consumed: removing it would put the
+                // page back on the stale argument at its next composition. A null written there
+                // (the player was another anime's) clears the argument too.
+                val returnEpisode by entry.savedStateHandle
+                    .getStateFlow(PLAYER_RETURN_EPISODE_KEY, arrivalEpisode)
+                    .collectAsState()
                 LaunchedEffect(id) { DiagnosticsLog.event("Route DETAIL content entered id=$id") }
                 DetailScreen(
                     animeId = id,
@@ -2010,7 +2019,7 @@ private fun AppNavHost(
                     showEpisodeListInitially = showEpisodes,
                     inPictureInPicture = inPictureInPicture,
                     onPictureInPictureReadyChanged = onPictureInPictureReadyChanged,
-                    onBack = {
+                    onBack = { playingEpisode ->
                         // WatchScreen's Back is documented as leaving for the anime page, but that
                         // page is only under the player when the player was opened from it. A
                         // resume from Continue Watching launches Watch straight from a tab, so on
@@ -2019,12 +2028,25 @@ private fun AppNavHost(
                         // it opens on that episode rather than on episode one. A player opened
                         // from the anime page itself keeps its ordinary pop, which lands the same
                         // place without rebuilding it.
-                        val previous = Routes.tabRoute(nav.previousBackStackEntry?.destination?.route)
+                        //
+                        // "The episode just left" is the one on screen, not this route's argument:
+                        // Next and auto-play move on inside the route, so the argument is only
+                        // where the session started.
+                        val previousEntry = nav.previousBackStackEntry
+                        val previous = Routes.tabRoute(previousEntry?.destination?.route)
                         if (device.isTv && previous in Routes.tabRoutes) {
-                            nav.navigate(Routes.detail(watchId, watchEpisode)) {
+                            val handBack = episodeToHandBack(watchId, watchId, watchEpisode, playingEpisode)
+                            nav.navigate(Routes.detail(watchId, handBack)) {
                                 popUpTo(Routes.WATCH) { inclusive = true }
                             }
                         } else {
+                            if (previousEntry?.destination?.route == Routes.DETAIL_DESTINATION) {
+                                val detailId = previousEntry.arguments?.getInt(Routes.Arg.ID)
+                                if (detailId != null) {
+                                    previousEntry.savedStateHandle[PLAYER_RETURN_EPISODE_KEY] =
+                                        episodeToHandBack(detailId, watchId, watchEpisode, playingEpisode)
+                                }
+                            }
                             nav.popBackStack()
                         }
                     },
@@ -2068,6 +2090,12 @@ private fun NavController.navigateTab(route: String) {
         restoreState = restoreTabState
     }
 }
+
+/**
+ * Saved-state key on an anime page's back-stack entry: the episode the player was on when Back
+ * left it for that page. Overrides the entry's `episode` route argument; see [episodeToHandBack].
+ */
+private const val PLAYER_RETURN_EPISODE_KEY = "playerReturnEpisode"
 
 /** Debug builds: update-prompt notes to preview; see MainActivity.applyBenchmarkPin. */
 private const val EXTRA_PREVIEW_CHANGELOG = "com.anilili.debug.PREVIEW_CHANGELOG"
