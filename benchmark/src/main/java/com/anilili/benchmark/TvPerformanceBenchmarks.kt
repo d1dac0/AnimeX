@@ -7,8 +7,6 @@ import androidx.benchmark.macro.StartupMode
 import androidx.benchmark.macro.StartupTimingMetric
 import androidx.benchmark.macro.junit4.MacrobenchmarkRule
 import androidx.test.ext.junit.runners.AndroidJUnit4
-import androidx.test.uiautomator.By
-import androidx.test.uiautomator.Until
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -28,8 +26,12 @@ class TvPerformanceBenchmarks {
         setupBlock = { pressHome() },
     ) {
         startActivityAndWait()
-        check(device.wait(Until.hasObject(By.pkg(TARGET_PACKAGE).depth(0)), APP_WAIT_MS))
-        device.waitForIdle()
+        // The app reports fully drawn when the first Home load settles (#85), so the iteration has
+        // to stay open until real Home content is on screen: ending at the package window alone —
+        // the old wait — measured only timeToInitialDisplayMs, the intro's black frame, and never
+        // saw the report. A rail title only exists once the settle has happened, and it also
+        // replaces waitForIdle(), which returns while the intro still holds every key.
+        check(waitTvHomeDrivable(device)) { "Home content never became drivable" }
     }
 
     @Test
@@ -42,8 +44,10 @@ class TvPerformanceBenchmarks {
         setupBlock = {
             pressHome()
             startActivityAndWait()
-            check(device.wait(Until.hasObject(By.pkg(TARGET_PACKAGE).depth(0)), APP_WAIT_MS))
-            device.waitForIdle()
+            // Same wait as the cold benchmark (#85): a rail title, not waitForIdle(). MainActivity
+            // drops every key while the intro plays and "Who's watching?" is due, and idle is
+            // exactly when that is true, so the old setup's D-pad pass recorded nothing.
+            check(waitTvHomeDrivable(device)) { "Home content never became drivable" }
         },
     ) {
         repeat(12) { device.pressDPadRight() }
