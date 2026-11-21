@@ -20,6 +20,7 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 
 /**
@@ -50,6 +51,7 @@ internal object LocalStreamProxy {
     private val tokens = ConcurrentHashMap<Entry, String>()
     private val random = SecureRandom()
     private val lastRequestAt = AtomicLong(0L)
+    private val openConnections = AtomicInteger(0)
 
     @Volatile private var serverSocket: ServerSocket? = null
     @Volatile private var port: Int = 0
@@ -135,6 +137,7 @@ internal object LocalStreamProxy {
     private fun acceptLoop(socket: ServerSocket) {
         while (!socket.isClosed) {
             val connection = runCatching { socket.accept() }.getOrElse { return }
+            openConnections.incrementAndGet()
             workers.execute {
                 var watchdog: ScheduledFuture<*>? = null
                 try {
@@ -157,6 +160,10 @@ internal object LocalStreamProxy {
                 } finally {
                     watchdog?.cancel(false)
                     runCatching { connection.close() }
+                    // Idleness counts from the end of the last transfer, not its start: one direct
+                    // file can be a single connection that streams for the whole episode.
+                    lastRequestAt.set(System.currentTimeMillis())
+                    openConnections.decrementAndGet()
                 }
             }
         }
@@ -166,7 +173,12 @@ internal object LocalStreamProxy {
      * Closes the server once nothing has asked it for anything in a while.
      *
      * The hand-off has no completion to listen for — the viewer simply stops watching in the other
-     * app — so idleness is the only signal that the socket and the URLs behind it can go.
+     * app — so idleness is the only signal that the socket and the URLs behind it can go. It used
+     * to wait six hours, and the foreground service that keeps this alive pins the whole process
+     * (image cache, WebViews, stores) above the low-memory killer for all of that time, so on a
+     * TV stick the launcher or the next app was killed instead. A paused player whose connection
+     * the write watchdog has already closed reconnects with a range request on resume, so the
+     * wait only has to outlast an ordinary pause, not a whole evening.
      */
     private fun reapWhenIdle(socket: ServerSocket) {
         while (!socket.isClosed) {
@@ -176,7 +188,15 @@ internal object LocalStreamProxy {
                 Thread.currentThread().interrupt()
                 return
             }
-            if (System.currentTimeMillis() - lastRequestAt.get() < IDLE_SHUTDOWN_MS) continue
+            if (!localStreamProxyIdle(
+                    nowMs = System.currentTimeMillis(),
+                    lastActivityMs = lastRequestAt.get(),
+                    openConnections = openConnections.get(),
+                    idleShutdownMs = IDLE_SHUTDOWN_MS,
+                )
+            ) {
+                continue
+            }
             synchronized(this) {
                 if (serverSocket !== socket) return
                 entries.clear()
@@ -190,6 +210,34 @@ internal object LocalStreamProxy {
             DiagnosticsLog.event("LocalStreamProxy closed after $IDLE_SHUTDOWN_MS ms idle")
             return
         }
+    }
+
+    /**
+     * Forgets the previous hand-off's URLs before a new one publishes its own.
+     *
+     * Only one other player is watched at a time, so a new hand-off replaces the old one. The
+     * socket and its foreground service stay up — the new hand-off is about to publish through
+     * them, and stopping the service here would let its delayed `onDestroy` close the socket the
+     * new hand-off had just been given.
+     */
+    fun beginHandOff() {
+        entries.clear()
+        tokens.clear()
+        lastRequestAt.set(System.currentTimeMillis())
+    }
+
+    /**
+     * Shuts the proxy and its foreground service down, when something has made the hand-off moot:
+     * this app's own player preparing an item means the viewer is watching here again.
+     */
+    fun stop(reason: String) {
+        val wasRunning = synchronized(this) { serverSocket != null }
+        if (!wasRunning) return
+        shutdown()
+        appContext?.let { context ->
+            runCatching { context.stopService(LocalStreamProxyService.intent(context)) }
+        }
+        DiagnosticsLog.event("LocalStreamProxy stopped: $reason")
     }
 
     private fun serve(connection: Socket, output: OutputStream) {
@@ -305,9 +353,20 @@ internal object LocalStreamProxy {
     private const val CRLF = "\r\n"
     private const val SOCKET_TIMEOUT_MS = 30_000
     private const val IDLE_CHECK_MS = 30_000L
-    private const val IDLE_SHUTDOWN_MS = 6 * 60 * 60 * 1000L
+    private const val IDLE_SHUTDOWN_MS = 20 * 60 * 1000L
     private const val WRITE_STALL_TIMEOUT_MS = 60_000L
 }
+
+/**
+ * Whether the proxy has nothing left to serve: no connection open, and none closed or opened
+ * within [idleShutdownMs]. An open connection is a player still reading, however long ago it asked.
+ */
+internal fun localStreamProxyIdle(
+    nowMs: Long,
+    lastActivityMs: Long,
+    openConnections: Int,
+    idleShutdownMs: Long,
+): Boolean = openConnections <= 0 && nowMs - lastActivityMs >= idleShutdownMs
 
 /** A User-Agent alone works directly; only identity/gating headers justify a local proxy. */
 internal fun needsLocalStreamProxy(headers: Map<String, String>): Boolean = headers.any { (name, value) ->

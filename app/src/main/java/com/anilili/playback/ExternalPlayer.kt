@@ -274,6 +274,7 @@ internal fun launchExternalPlayer(
     session: ExternalPlaybackSession? = null,
 ): Boolean {
     return runCatching {
+        LocalStreamProxy.beginHandOff()
         val intent = externalPlayerIntent(context, request, forResult = session != null)
         val chosen = preferredPackage.takeIf(String::isNotBlank)
             ?.takeIf { canReceiveExternalPlayback(context, intent, it) }

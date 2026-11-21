@@ -481,9 +481,17 @@ class PlaybackService : MediaSessionService() {
                         if (isPlaying) allowMediaButtonResume()
                     }
 
+                    private var lastPlaybackState = Player.STATE_IDLE
+
                     override fun onPlaybackStateChanged(playbackState: Int) {
                         DiagnosticsLog.event("PlaybackService player state=${playbackState.stateName()}")
+                        val preparedFromIdle =
+                            lastPlaybackState == Player.STATE_IDLE && playbackState != Player.STATE_IDLE
+                        lastPlaybackState = playbackState
                         if (activePlayer !== source) return
+                        // Preparing an item here means the viewer is watching in this app again, so
+                        // a proxy kept up for an earlier external hand-off has nothing left to serve.
+                        if (preparedFromIdle) LocalStreamProxy.stop("native playback prepared")
                         if (playbackState == Player.STATE_READY && source === castRoute?.player) {
                             remoteRouteEverReady = true
                         }
