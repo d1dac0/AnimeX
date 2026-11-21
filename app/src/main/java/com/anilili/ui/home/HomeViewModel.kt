@@ -1,13 +1,14 @@
 package com.anilili.ui.home
 
+import android.app.Application
 import android.os.SystemClock
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
+import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.ProcessLifecycleOwner
-import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.anilili.data.AppGraph
 import com.anilili.diagnostics.DiagnosticsLog
@@ -111,10 +112,18 @@ data class PersonalRows(
 /** Recomputing is cheap but asks AniList for cards; coming back to Home more often than this reuses the rows. */
 private const val PERSONAL_REFRESH_AFTER_MS = 5L * 60 * 1000
 
-class HomeViewModel : ViewModel() {
+class HomeViewModel(app: Application) : AndroidViewModel(app) {
     private val repo = AppGraph.repository
     internal val yearTopRated = YearTopRated(viewModelScope) { year, page, force ->
         repo.topRatedByYear(year, page, force)
+    }
+
+    init {
+        // #85: the Activity.reportFullyDrawn() call lives behind the Application's lifecycle
+        // callbacks, because a ViewModel never sees the Activity and MainActivity registers nothing
+        // for it. The default `viewModel()` factory builds an AndroidViewModel from the Application,
+        // the same route RandomAnimeViewModel takes, so this needs nothing from the caller.
+        FullyDrawnSignal.install(app)
     }
 
     private val _state = MutableStateFlow<UiState<HomeData>>(UiState.Loading)
@@ -406,6 +415,10 @@ class HomeViewModel : ViewModel() {
                 // Settled either way. Optional startup work waits on this rather than a fixed
                 // delay, so it cannot land on top of the first screen still fetching.
                 com.anilili.ui.FirstContent.mark()
+                // #85: this settle is also the launch's fully-drawn moment — the framework's
+                // `Fully drawn` record and the macrobenchmark's timeToFullDisplayMs both come from
+                // it. The signal reports once, on the first settle only.
+                FullyDrawnSignal.onHomeSettled()
             }
         }
     }

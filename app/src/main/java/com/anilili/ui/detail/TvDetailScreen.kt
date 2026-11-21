@@ -69,25 +69,27 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.Saver
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.BiasAlignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.scale
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.InputMode
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
@@ -96,6 +98,7 @@ import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.Layout
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalInputModeManager
 import androidx.compose.ui.res.painterResource
@@ -111,6 +114,7 @@ import androidx.compose.ui.unit.isSpecified
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.zIndex
 import coil.compose.AsyncImage
+import coil.request.ImageRequest
 import com.anilili.R
 import com.anilili.data.library.EpisodeStop
 import com.anilili.data.library.HistoryEntry
@@ -127,6 +131,7 @@ import com.anilili.data.settings.EpisodeOrder
 import com.anilili.data.settings.SettingsStore
 import com.anilili.diagnostics.DiagnosticsLog
 import com.anilili.ui.adaptive.FocusFillColor
+import com.anilili.ui.adaptive.LocalAppDeviceProfile
 import com.anilili.ui.adaptive.focusHalo
 import com.anilili.ui.adaptive.TvCardCornerShape
 import com.anilili.ui.adaptive.TvFocusTarget
@@ -169,6 +174,9 @@ import java.time.LocalDate
 import java.time.format.DateTimeFormatter
 import java.util.Locale
 import kotlin.math.abs
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 import com.anilili.util.cached
 
@@ -450,13 +458,16 @@ internal fun TvDetailContent(
     // The still of the episode under the cursor becomes the page's backdrop — but only while the
     // viewer has asked to see episode art at all. Blurring a full-screen backdrop would leave the
     // page looking broken rather than spoiler-free, so the season's own artwork stands in instead.
+    // The choice itself lives in [tvDetailBackdropSource] (#58), so the JVM suite can pin it.
     //
     // The season's artwork, not [fallbackImage]. That one is withheld when no episode has a still,
     // so the cards do not repeat one picture a dozen times — a rule about a list of cards, and it
     // was blanking the backdrop along with them: Aware! Meisaku-kun (2026), twelve episodes and no
     // stills anywhere, opened on a black page while its unreleased sequel, with no episodes to
     // trip the rule, showed its cover. One backdrop cannot look repeated.
-    val backdrop: () -> Any? = { described()?.image?.takeIf { !blurEpisodeImages } ?: seasonArtwork }
+    val backdrop: () -> Any? = {
+        tvDetailBackdropSource(described()?.image, seasonArtwork, showEpisodeImages = !blurEpisodeImages)
+    }
 
     val saveActionFocusRequester = remember { FocusRequester() }
     val canWatch = episodes.isNotEmpty() || seasonResume != null
@@ -774,11 +785,46 @@ internal fun TvDetailContent(
 /**
  * The page's backdrop. Its own composable so that the cursor's episode, which [model] reads, only
  * recomposes the picture rather than the page around it.
+ *
+ * #58: on the full-cost path this is exactly what it always was — a new model per cursor step,
+ * with the shared ImageLoader's 150ms crossfade on it (MiruroApp owns that default; it stays). On
+ * the low-cost TV path the backdrop follows the cursor only once it has settled — the settle
+ * delay, `TV_DETAIL_BACKDROP_SETTLE_MS`, is Home's hero settle restated — and the request carries
+ * crossfade(false), because a held Right used to start a full-screen decode plus a crossfade under
+ * the page's two gradients on every press.
  */
 @Composable
 private fun TvDetailBackdrop(model: () -> Any?) {
+    val context = LocalContext.current
+    if (tvDetailBackdropFollowsCursorLive(LocalAppDeviceProfile.current.useLowCostTvEffects)) {
+        AsyncImage(
+            model = model(),
+            contentDescription = null,
+            modifier = Modifier.fillMaxSize(),
+            contentScale = ContentScale.Crop,
+        )
+        return
+    }
+    // Keyed on the lambda: the page hands a fresh one over whenever the values it closes over
+    // change (enrichment swaps every episode for a copy, the season's art arrives), and the
+    // settled read has to follow those, not stay with the first composition's capture.
+    val settled = produceState(model(), model) {
+        snapshotFlow { model() }
+            .distinctUntilChanged()
+            .collectLatest { source ->
+                // A held Right walks the strip faster than the settle: collectLatest drops every
+                // intermediate still, and the one the cursor finally rests on is the one that loads.
+                if (source != value) delay(TV_DETAIL_BACKDROP_SETTLE_MS)
+                value = source
+            }
+    }
     AsyncImage(
-        model = model(),
+        model = remember(settled.value, context) {
+            ImageRequest.Builder(context)
+                .data(settled.value)
+                .crossfade(false)
+                .build()
+        },
         contentDescription = null,
         modifier = Modifier.fillMaxSize(),
         contentScale = ContentScale.Crop,
@@ -2066,7 +2112,15 @@ private fun TvRelatedCardBody(
     val media = card.media
     var focused by remember { mutableStateOf(false) }
     val accent = MaterialTheme.colorScheme.primary
-    val scale by animateFloatAsState(if (focused) 1.045f else 1f, label = "tv-related-card-scale")
+    // #58: the lift animates on every focus step, so it is read inside graphicsLayer — the frame
+    // re-layers the card without recomposing it — and it does not run at all on the low-cost TV
+    // path, where the step itself is the indication and the animation is one more layer to drive.
+    val lowCostTvEffects = LocalAppDeviceProfile.current.useLowCostTvEffects
+    val animatedScale = if (lowCostTvEffects) {
+        null
+    } else {
+        animateFloatAsState(if (focused) 1.045f else 1f, label = "tv-related-card-scale")
+    }
     Box(
         modifier = modifier
             .width(TvRelatedCardWidth)
@@ -2074,7 +2128,11 @@ private fun TvRelatedCardBody(
             // Lifted by hand rather than through focusHighlight, which clips inside itself and
             // would shave off the halo; this is how the episode cards beside it do it.
             .zIndex(if (focused) 1f else 0f)
-            .scale(scale)
+            .graphicsLayer {
+                val scale = animatedScale?.value ?: 1f
+                scaleX = scale
+                scaleY = scale
+            }
             .onFocusChanged {
                 focused = it.isFocused
                 if (it.isFocused) onFocused()
@@ -2274,7 +2332,15 @@ private fun TvEpisodeCard(
     modifier: Modifier = Modifier,
 ) {
     var focused by remember { mutableStateOf(false) }
-    val scale by animateFloatAsState(if (focused) 1.045f else 1f, label = "tv-episode-card-scale")
+    // #58: read inside graphicsLayer rather than in composition, so the animation re-layers the
+    // card without recomposing it, and held at 1f on the low-cost TV path for the same reason the
+    // Related cards beside the episodes strip drop it.
+    val lowCostTvEffects = LocalAppDeviceProfile.current.useLowCostTvEffects
+    val animatedScale = if (lowCostTvEffects) {
+        null
+    } else {
+        animateFloatAsState(if (focused) 1.045f else 1f, label = "tv-episode-card-scale")
+    }
     val countdown = airsAt?.takeIf { unaired }?.let { tvEpisodeCountdown(it) }
     // The eye is offered on everything that has aired. It used to be drawn only once an episode was
     // already watched, which made it a badge that happened to be pressable: the only way to *make*
@@ -2293,7 +2359,11 @@ private fun TvEpisodeCard(
         modifier = modifier
             .width(TvEpisodeCardWidth)
             .zIndex(if (focused) 1f else 0f)
-            .scale(scale)
+            .graphicsLayer {
+                val scale = animatedScale?.value ?: 1f
+                scaleX = scale
+                scaleY = scale
+            }
             // A counting card keeps its clock at full strength and dims its picture instead: the
             // clock is the thing on it worth reading, and greying it with the rest hid exactly that.
             .alpha(if (unaired && countdown == null) UNAIRED_ALPHA else 1f)
