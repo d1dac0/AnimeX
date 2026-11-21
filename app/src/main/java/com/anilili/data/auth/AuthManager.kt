@@ -71,6 +71,8 @@ object AuthManager {
         pendingOAuthState = null
         AniListNotificationPushManager.clearDelivered(appContext)
         ReleaseSyncScheduler.runNow(appContext)
+        // The periodic poll exists only for a signed-in viewer, so signing in is what schedules it.
+        AiringPollScheduler.sync(appContext)
         AiringPollScheduler.runNow(appContext)
     }
 
@@ -132,6 +134,9 @@ object AuthManager {
         _token.value = null
         pendingOAuthState = null
         AniListNotificationPushManager.clearDelivered(appContext)
+        // Signed out, there is no feed to poll: cancel the periodic wake rather than let it run
+        // every fifteen minutes only to return.
+        runCatching { AiringPollScheduler.sync(appContext, enabled = false) }
         if (scheduleSync) ReleaseSyncScheduler.runNow(appContext)
     }
 }

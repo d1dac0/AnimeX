@@ -32,6 +32,9 @@ class AiringPollWorker(
 ) : CoroutineWorker(context, params) {
 
     override suspend fun doWork(): Result {
+        // A wake that cold-started the process gets here before the DataStore read lands, and the
+        // in-memory default is "on": wait for the stored switch rather than poll against it.
+        SettingsStore.awaitLoaded()
         if (!SettingsStore.releaseNotifications.value) return Result.success()
         // Logged-out users have no feed to read; their alerts are local alarms instead.
         if (!AuthManager.isLoggedIn) return Result.success()
@@ -61,12 +64,23 @@ object AiringPollScheduler {
     private val network = Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build()
 
     /**
-     * Brings the schedule in line with the setting. Safe to call on every launch: `KEEP` leaves an
-     * already-scheduled poll on its own cadence rather than restarting its period each time.
+     * Whether the periodic poll should exist at all: only for a viewer who wants release
+     * notifications *and* has an AniList feed to read. The worker returns at once for anyone else,
+     * but each fifteen-minute wake of a dead process still pays for the whole of
+     * `MiruroApp.onCreate`, so a viewer it cannot serve must not have it scheduled.
+     */
+    internal fun shouldPoll(releaseNotifications: Boolean, loggedIn: Boolean): Boolean =
+        releaseNotifications && loggedIn
+
+    /**
+     * Brings the schedule in line with the setting and the AniList sign-in. Safe to call on every
+     * launch: `KEEP` leaves an already-scheduled poll on its own cadence rather than restarting its
+     * period each time. [enabled] is the release-notifications switch; the sign-in is read here, so
+     * every caller gets the same rule.
      */
     fun sync(context: Context, enabled: Boolean = SettingsStore.releaseNotifications.value) {
         val work = WorkManager.getInstance(context.applicationContext)
-        if (!enabled) {
+        if (!shouldPoll(enabled, AuthManager.isLoggedIn)) {
             work.cancelUniqueWork(PERIODIC_NAME)
             return
         }
