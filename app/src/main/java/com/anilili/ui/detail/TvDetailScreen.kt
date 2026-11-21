@@ -304,7 +304,6 @@ internal fun TvDetailContent(
     // Keyed on the rows rather than on the season id alone: enrichment replaces every EpisodeItem
     // with a copy carrying its title and still, and state memoised on the ids alone would hold the
     // blocks computed from the bare skeleton for as long as the page was open.
-    val episodeKeys = episodes.map(EpisodeItem::pipeId)
     val episodeOrder by SettingsStore.episodeOrder.collectAsState()
     val blocks = remember(episodes, episodeOrder) { orderEpisodeBlocks(episodeBlocks(episodes), episodeOrder) }
     // Back from the player names the episode it left, so the page can open exactly where the
@@ -319,7 +318,11 @@ internal fun TvDetailContent(
         openingEpisode(episodes, seasonResume?.episodeNumber, isUnaired = { episodeIsUnaired(it, season) })
     }
     // Keyed on the order too: an index into the ranges names a different range once they turn round.
-    var selectedBlockIndex by remember(data.selectedSeasonId, episodeKeys, episodeOrder) {
+    // Not keyed on the rows themselves: a revalidation or an airing appends one a second or two
+    // after an airing show opens, and that reset the range the viewer had chosen. Only the season
+    // gaining its first rows (an uncounted or switched season finishing its load) re-chooses, so
+    // the opening range still follows the resume point; the index is clamped below.
+    var selectedBlockIndex by remember(data.selectedSeasonId, episodes.isEmpty(), episodeOrder) {
         mutableIntStateOf(
             arrivalEpisode
                 ?.let { episode ->
@@ -330,7 +333,8 @@ internal fun TvDetailContent(
         )
     }
     val blockIndex = selectedBlockIndex.coerceIn(0, (blocks.size - 1).coerceAtLeast(0))
-    var query by remember(data.selectedSeasonId, episodeKeys) { mutableStateOf("") }
+    // The season only, for the same reason: an appended row must not wipe what the viewer typed.
+    var query by remember(data.selectedSeasonId) { mutableStateOf("") }
     var searching by remember(data.selectedSeasonId) { mutableStateOf(false) }
     var tab by remember(data.info.id) { mutableStateOf(TvDetailTab.EPISODES) }
     var relatedFilter by remember(data.info.id) { mutableStateOf(RelatedFilter.ALL) }
@@ -1550,20 +1554,27 @@ private fun TvEpisodeStrip(
     }
     // The effects below retry across frames, and the list of targets can be replaced in between.
     val currentFocusTargets by rememberUpdatedState(focusTargets)
+    val currentEpisodes by rememberUpdatedState(episodes)
+    // What the strip is showing, as opposed to which rows it holds: the season, the range, the
+    // search and the order. A row appended by a revalidation or an airing changes the rows and none
+    // of these, and must leave the scroll and the cursor where the viewer put them.
+    val openKey = "${season.id}|$selectedBlockIndex|$query|$upcomingFirst"
     // Seeded with the card the strip opens on, so the first Down into it lands there rather than
     // on whichever card happens to sit under the chip above — on a long series that was a card
-    // several along from the newest episode the strip had just scrolled to.
-    var focusedIndex by remember(episodes.firstOrNull()?.pipeId) {
-        mutableIntStateOf(
-            openOnPipeId
-                ?.let { id -> episodes.indexOfFirst { it.pipeId == id } }
-                ?.takeIf { it >= 0 }
-                ?: 0,
-        )
+    // several along from the newest episode the strip had just scrolled to. Held by id rather than
+    // by index, because a row appended at the head of a newest-first strip moves every index along.
+    var focusedPipeId by remember(openKey) { mutableStateOf(openOnPipeId) }
+    val focusedIndex: () -> Int = {
+        currentEpisodes.indexOfFirst { it.pipeId == focusedPipeId }.coerceAtLeast(0)
     }
 
     // Opens where the viewer left off rather than at episode one, the same as the list it replaced.
-    LaunchedEffect(episodes.map(EpisodeItem::pipeId), leadingItems) {
+    // Once per range on show: re-run on every change to the rows, it scrolled the strip back from
+    // wherever the viewer had walked to whenever a row was appended.
+    var openedFor by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(openKey, episodes.isEmpty()) {
+        if (episodes.isEmpty() || openedFor == openKey) return@LaunchedEffect
+        openedFor = openKey
         val target = openOnPipeId
             ?.let { id -> episodes.indexOfFirst { it.pipeId == id } }
             ?.takeIf { it >= 0 }
@@ -1581,16 +1592,19 @@ private fun TvEpisodeStrip(
     // came back for, so the cursor goes there instead of nowhere. Scrolled first and focused a
     // frame later, the same dance a held key does, because a card that is not composed owns no
     // focus target.
-    var arrivalFocusTaken by remember(episodes.firstOrNull()?.pipeId) { mutableStateOf(false) }
-    LaunchedEffect(episodes.map(EpisodeItem::pipeId), arrivalFocusPipeId) {
-        val target = arrivalFocusPipeId?.let { id -> episodes.indexOfFirst { it.pipeId == id } } ?: -1
-        if (target < 0 || arrivalFocusTaken) return@LaunchedEffect
-        listState.scrollToItem(target + leadingItems)
+    // Keyed on the episode asked for, not on the head of the list: in newest-first order an
+    // appended row is the new head, and the arrival ran again and pulled the cursor back to it.
+    var arrivalFocusTaken by remember(arrivalFocusPipeId) { mutableStateOf(false) }
+    val arrivalOnShow = arrivalFocusPipeId != null && episodes.any { it.pipeId == arrivalFocusPipeId }
+    LaunchedEffect(arrivalFocusPipeId, arrivalOnShow) {
+        if (!arrivalOnShow || arrivalFocusTaken) return@LaunchedEffect
+        val arrivalIndex = { currentEpisodes.indexOfFirst { it.pipeId == arrivalFocusPipeId } }
+        listState.scrollToItem(arrivalIndex().coerceAtLeast(0) + leadingItems)
         withFrameNanos { }
         // Retried like the page's first focus: on a slow box the card can still be unattached a
         // frame after the scroll, and one attempt that missed left nothing focused.
         val attempts = retryTvFocus(TV_DETAIL_FOCUS_ATTEMPTS) {
-            val card = currentFocusTargets.getOrNull(target)?.takeIf(TvFocusTarget::isAttached)
+            val card = currentFocusTargets.getOrNull(arrivalIndex())?.takeIf(TvFocusTarget::isAttached)
                 ?: return@retryTvFocus false
             runCatching { card.requester.requestFocus() }.isSuccess && card.holdsFocus
         }
@@ -1604,10 +1618,11 @@ private fun TvEpisodeStrip(
 
     val stepBy: (Int) -> Boolean = step@{ delta ->
         if (episodes.isEmpty()) return@step false
-        val target = (focusedIndex + delta).coerceIn(0, episodes.lastIndex)
+        val from = focusedIndex()
+        val target = (from + delta).coerceIn(0, episodes.lastIndex)
         // At either end the press is given back, so holding Right on the last episode leaves the
         // strip by ordinary focus search rather than stopping dead against its edge.
-        if (target == focusedIndex) return@step false
+        if (target == from) return@step false
         scope.launch {
             // Scrolled first and focused a frame later: a card that is not composed holds no
             // focus target, and requesting focus on an unattached one throws inside Compose's
@@ -1706,7 +1721,7 @@ private fun TvEpisodeStrip(
                     .tvHoldToStep(stepBy)
                     // Back onto the card last left, or the one the strip opened on.
                     .focusProperties {
-                        enter = { rememberedTvRailRequester(focusTargets, focusedIndex) }
+                        enter = { rememberedTvRailRequester(focusTargets, focusedIndex()) }
                     }
                     .focusGroup()
                     .tvFocusHandoff(Key.DirectionUp, cardUpTarget),
@@ -1750,7 +1765,7 @@ private fun TvEpisodeStrip(
                         onClick = { onPlay(episode) },
                         onToggleWatched = { onToggleWatched(episode) },
                         onFocused = {
-                            focusedIndex = index
+                            focusedPipeId = episode.pipeId
                             onEpisodeFocused(episode)
                         },
                         modifier = Modifier.tvFocusTarget(focusTargets.getOrNull(index)),
