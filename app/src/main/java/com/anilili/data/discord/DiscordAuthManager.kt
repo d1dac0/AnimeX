@@ -4,9 +4,12 @@ import android.content.Context
 import android.net.Uri
 import android.util.Base64
 import com.anilili.data.auth.SecureTokenStore
+import com.anilili.data.auth.StartupTokenService
+import com.anilili.data.auth.restoreOnStartup
 import com.anilili.diagnostics.DiagnosticsLog
 import java.security.MessageDigest
 import java.security.SecureRandom
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -141,10 +144,17 @@ object DiscordAuthManager {
     private val _account = MutableStateFlow<DiscordAccount?>(null)
     val account = _account.asStateFlow()
 
-    fun init(context: Context, client: OkHttpClient) {
+    fun init(context: Context, client: OkHttpClient, startupScope: CoroutineScope) {
         tokenStore = SecureTokenStore(context.applicationContext, SecureTokenStore.KEY_DISCORD_TOKENS)
         pendingStore = SecureTokenStore(context.applicationContext, SecureTokenStore.KEY_DISCORD_PENDING_AUTH)
         httpClient = client
+        // #87: the Keystore decrypt moves off Main; the StateFlows below publish what it finds.
+        // DiscordPresence collects `loggedIn`, so a late publication reaches the presence
+        // connection the same way a mid-session sign-in does.
+        restoreOnStartup(StartupTokenService.DISCORD, startupScope, ::restoreStoredTokens)
+    }
+
+    private fun restoreStoredTokens() {
         _tokens.value = tokenStore.load()?.let { raw ->
             runCatching { json.decodeFromString(DiscordTokens.serializer(), raw) }.getOrNull()
         }

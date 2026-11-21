@@ -132,18 +132,22 @@ class MiruroApp : Application(), ImageLoaderFactory {
         diagnosticsStep("SettingsSearchHistory.init") {
             com.anilili.data.settings.SettingsSearchHistory.init(this)
         }
-        diagnosticsStep("AuthManager.init") { AuthManager.init(this) }
-        diagnosticsStep("MalAuthManager.init") { MalAuthManager.init(this, AppGraph.httpClient) }
+        // Each manager passes the startup scope so its stored-token decrypt happens where
+        // StartupTokenPolicy puts it: AniList on Main — the only one the first Home frame needs —
+        // and the MyAnimeList, Simkl, OpenSubtitles and Discord ones here on IO, publishing their
+        // logged-in StateFlows when they land (#87).
+        diagnosticsStep("AuthManager.init") { AuthManager.init(this, startupScope) }
+        diagnosticsStep("MalAuthManager.init") { MalAuthManager.init(this, AppGraph.httpClient, startupScope) }
         diagnosticsStep("SimklAuthManager.init") {
-            com.anilili.data.auth.SimklAuthManager.init(this, AppGraph.httpClient)
+            com.anilili.data.auth.SimklAuthManager.init(this, AppGraph.httpClient, startupScope)
             com.anilili.data.remote.SimklTracker.init(this)
         }
         diagnosticsStep("OpenSubtitlesAuthManager.init") {
-            com.anilili.data.auth.OpenSubtitlesAuthManager.init(this, AppGraph.openSubtitles)
+            com.anilili.data.auth.OpenSubtitlesAuthManager.init(this, AppGraph.openSubtitles, startupScope)
         }
         diagnosticsStep("SettingsStore.init") { SettingsStore.init(this) }
         diagnosticsStep("DiscordAuthManager.init") {
-            com.anilili.data.discord.DiscordAuthManager.init(this, AppGraph.httpClient)
+            com.anilili.data.discord.DiscordAuthManager.init(this, AppGraph.httpClient, startupScope)
         }
         // After SettingsStore, whose switch it observes to decide whether to publish at all.
         diagnosticsStep("DiscordPresence.init") { com.anilili.data.discord.DiscordPresence.init(this) }

@@ -6,6 +6,7 @@ import com.anilili.diagnostics.DiagnosticsLog
 import com.anilili.errors.AnililiError
 import com.anilili.errors.raise
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -39,12 +40,18 @@ object OpenSubtitlesAuthManager {
     private val _username = MutableStateFlow<String?>(null)
     val username = _username.asStateFlow()
 
-    fun init(context: Context, openSubtitlesClient: OpenSubtitlesClient) {
+    fun init(context: Context, openSubtitlesClient: OpenSubtitlesClient, startupScope: CoroutineScope) {
         client = openSubtitlesClient
         credentialStore = SecureTokenStore(
             context.applicationContext,
             SecureTokenStore.KEY_OPEN_SUBTITLES_CREDENTIALS,
         )
+        // #87: the Keystore decrypt moves off Main; the StateFlows below publish what it finds.
+        // `credentials` is @Volatile, so the session renewals that read it see the publication.
+        restoreOnStartup(StartupTokenService.OPEN_SUBTITLES, startupScope, ::restoreStoredCredentials)
+    }
+
+    private fun restoreStoredCredentials() {
         credentials = credentialStore.load()?.let { raw ->
             runCatching { json.decodeFromString(OpenSubtitlesCredentials.serializer(), raw) }
                 .getOrNull()
