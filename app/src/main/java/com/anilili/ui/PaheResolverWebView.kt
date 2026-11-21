@@ -35,6 +35,9 @@ fun PaheResolverWebView() {
                 try {
                     DiagnosticsLog.webViewPackage("PaheResolverWebView factory")
                     WebView(ctx).also {
+                        // Timers are paused process-wide, never per view; a pause left behind by
+                        // the embed player would stall the clearance into its cooldown.
+                        it.resumeTimers()
                         it.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
                         it.isFocusable = false
                         it.isClickable = false

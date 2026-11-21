@@ -1,8 +1,12 @@
 package com.anilili.data.remote
 
 import com.anilili.diagnostics.DiagnosticsLog
+import kotlinx.coroutines.ThreadContextElement
+import kotlinx.coroutines.asContextElement
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeoutOrNull
+import okhttp3.Call
+import okhttp3.EventListener
 import okhttp3.Interceptor
 import okhttp3.Request
 import okhttp3.Response
@@ -40,6 +44,20 @@ internal class CloudflareInterceptor : Interceptor {
         // would make every future request re-challenge with no way for the retry to differ.
         if (stored != null) {
             CloudflareClearanceStore.forget(host)
+        }
+
+        // Nobody asked for this request while looking at it: a validation sweep or a next-episode
+        // preheat running under playback. Raising the dialog there takes the remote away from the
+        // episode on screen mid-watch — judged unacceptable for the pipe (PipeBridge.humanCheckPending)
+        // and missed here. The challenge response goes back as the answer; the next request a
+        // viewer actually waits on will ask.
+        if (NonInteractiveChallenge.appliesTo(chain)) {
+            DiagnosticsLog.event(
+                category = "cloudflare",
+                name = "cloudflare.challenge.deferred",
+                attributes = mapOf("host" to host, "code" to first.code),
+            )
+            return first
         }
 
         // begin() returns a deferred that outlives this call on purpose. Cancelling the wait must
@@ -113,4 +131,41 @@ internal class CloudflareInterceptor : Interceptor {
             "__cf_chl",
         )
     }
+}
+
+/**
+ * Marks provider requests whose caller cannot put a Cloudflare challenge on screen.
+ *
+ * `allowInteractiveChallenges = false` used to stop at the AllAnime CAPTCHA; the interceptor never
+ * heard of it, so a background request during playback could still open a full-screen dialog.
+ * Three ways to carry the mark, because providers make their requests three ways:
+ *
+ * - [asContextElement] around the work. It sets a thread-local wherever that coroutine runs —
+ *   `runInterruptible` blocks included — which covers every synchronous `execute()`.
+ * - [eventListenerFactory] on the client. OkHttp creates the listener on the thread that calls
+ *   `newCall`, so a call made under the mark stays marked when `enqueue` runs it on a dispatcher
+ *   thread the thread-local never reaches.
+ * - A request tag of this type, for a caller that builds the request itself.
+ */
+internal object NonInteractiveChallenge {
+    private val active = ThreadLocal<Boolean?>()
+    private val markedCalls: MutableSet<Call> =
+        java.util.Collections.newSetFromMap(java.util.WeakHashMap<Call, Boolean>())
+
+    fun asContextElement(): ThreadContextElement<Boolean?> = active.asContextElement(true)
+
+    private fun activeOnThisThread(): Boolean = active.get() == true
+
+    fun eventListenerFactory(delegate: EventListener.Factory): EventListener.Factory =
+        object : EventListener.Factory {
+            override fun create(call: Call): EventListener {
+                if (activeOnThisThread()) synchronized(markedCalls) { markedCalls.add(call) }
+                return delegate.create(call)
+            }
+        }
+
+    fun appliesTo(chain: Interceptor.Chain): Boolean =
+        chain.request().tag(NonInteractiveChallenge::class.java) != null ||
+            activeOnThisThread() ||
+            synchronized(markedCalls) { chain.call() in markedCalls }
 }

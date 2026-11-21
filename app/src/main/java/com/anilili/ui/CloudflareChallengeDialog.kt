@@ -3,7 +3,10 @@ package com.anilili.ui
 import android.annotation.SuppressLint
 import android.graphics.Color
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.view.KeyEvent
+import android.view.View
 import android.view.ViewGroup
 import android.webkit.CookieManager
 import android.webkit.RenderProcessGoneDetail
@@ -44,6 +47,7 @@ import androidx.compose.ui.window.DialogProperties
 import com.anilili.data.remote.CloudflareChallengeCoordinator
 import com.anilili.data.remote.CloudflareClearance
 import com.anilili.data.remote.CloudflareClearanceStore
+import com.anilili.diagnostics.CrashReporter
 import com.anilili.diagnostics.DiagnosticsLog
 import com.anilili.diagnostics.WebViewProcessController
 import com.anilili.ui.adaptive.focusFill
@@ -131,7 +135,14 @@ private fun CloudflareWebView(
     AndroidView(
         modifier = Modifier.fillMaxSize().focusProperties { canFocus = true },
         factory = { context ->
+            // Guarded like every other WebView in the app. During a System WebView update, or
+            // with the provider disabled, the constructor throws — and this dialog can be raised
+            // by a background request mid-episode, so the throw would take playback with it.
+            try {
             WebView(context).apply {
+                // Timers are paused process-wide, never per view; a pause left behind by the
+                // embed player would freeze the challenge script.
+                resumeTimers()
                 setOnKeyListener { _, keyCode, event ->
                     if (keyCode == KeyEvent.KEYCODE_BACK && event.action == KeyEvent.ACTION_UP) {
                         currentOnCancel()
@@ -214,9 +225,16 @@ private fun CloudflareWebView(
                 WebViewProcessController.register(this, "cloudflare-challenge")
                 loadUrl(url)
             }
+            } catch (e: Throwable) {
+                CrashReporter.logNonFatal("System WebView unavailable; Cloudflare challenge skipped", e)
+                // Posted: cancelling clears the coordinator's state, which must not change in the
+                // middle of the composition that is building this view.
+                Handler(Looper.getMainLooper()).post { currentOnCancel() }
+                View(context)
+            }
         },
         onRelease = { view ->
-            val web = view as WebView
+            val web = view as? WebView ?: return@AndroidView
             DiagnosticsLog.event("Cloudflare challenge WebView release")
             web.stopLoading()
             web.webChromeClient = null

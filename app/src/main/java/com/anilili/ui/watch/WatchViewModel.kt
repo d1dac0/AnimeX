@@ -29,6 +29,7 @@ import com.anilili.data.model.aniSkipSegmentIds
 import com.anilili.data.model.hasUsableWindow
 import com.anilili.data.model.EpisodeMetadata
 import com.anilili.data.model.Media
+import com.anilili.data.remote.NonInteractiveChallenge
 import com.anilili.data.remote.PipeBridge
 import com.anilili.diagnostics.DiagnosticsLog
 import com.anilili.diagnostics.rendererCrashIsFatal
@@ -2751,7 +2752,9 @@ class WatchViewModel : ViewModel() {
             val newlyConfirmedFallbackProviders = mutableSetOf<String>()
             candidates.chunked(validationConcurrency).forEachIndexed { batchIndex, batch ->
                 val results = batch.map { option ->
-                    async {
+                    // Playback is on screen while this sweeps, so a Cloudflare challenge it meets
+                    // must not open a dialog over the episode; the flag below only reaches AllAnime.
+                    async(NonInteractiveChallenge.asContextElement()) {
                         val resolution = runCatching {
                             repo.resolveSources(
                                 anilistId = anilistId,

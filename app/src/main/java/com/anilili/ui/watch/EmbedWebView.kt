@@ -274,6 +274,15 @@ fun EmbedWebView(
     // so the URL travels with the message and the effect below discards a stale one.
     var pagePlayerError by remember { mutableStateOf<Pair<String, String>?>(null) }
     var webView by remember { mutableStateOf<WebView?>(null) }
+    // Bumped when the renderer dies. The platform says a WebView "can't be used" after
+    // onRenderProcessGone, yet the AndroidView stayed mounted and the next embed (a fallback is
+    // the usual next step) was loaded into the dead instance. Keying the view on this builds a
+    // fresh one and lets the dead one go through onRelease.
+    var rendererGeneration by remember { mutableIntStateOf(0) }
+    // Views whose renderer is gone: their release skips the page calls and only tears them down.
+    val deadRendererViews = remember {
+        java.util.Collections.newSetFromMap(java.util.WeakHashMap<WebView, Boolean>())
+    }
     var finishedUrl by remember(activeUrl) { mutableStateOf<String?>(null) }
     val currentOnPlaybackStopperChanged by rememberUpdatedState(onPlaybackStopperChanged)
     val currentOnFullscreenChanged by rememberUpdatedState(onFullscreenChanged)
@@ -1285,7 +1294,15 @@ fun EmbedWebView(
                     currentActiveUrl,
                     currentPositionMs(),
                 )
-                if (webView === view) webView = null
+                view?.let(deadRendererViews::add)
+                if (webView === view) {
+                    webView = null
+                    // The fresh view has loaded nothing yet, so whichever URL is active once it
+                    // is built — the fallback's, or this one again if nothing moved — is loaded.
+                    lastRequestedUrl.value = null
+                    rendererGeneration++
+                    DiagnosticsLog.event("EmbedWebView renderer gone; rebuilding generation=$rendererGeneration")
+                }
                 return true
             }
         }
@@ -1299,6 +1316,11 @@ fun EmbedWebView(
             onDispose {}
         } else {
             val activity = context.findActivity()
+            // pauseTimers() is process-wide, so a pause this observer made must not outlive it:
+            // were the player to leave while the app sits in the background, the ON_START that
+            // would have answered it never reaches this observer, and every other WebView in the
+            // app — resolvers, challenge dialogs, the login page — would stay frozen.
+            var timersPaused = false
             val observer = LifecycleEventObserver { _, event ->
                 when (event) {
                     // Shrinking into the mini player pauses the activity too, and by the time
@@ -1310,22 +1332,31 @@ fun EmbedWebView(
                         dispatchWebPlayerCommand(web, "pause", fallbackScript = PAUSE_VIDEO_JS)
                         web.onPause()
                         web.pauseTimers()
+                        timersPaused = true
                     }
                     Lifecycle.Event.ON_STOP -> {
                         dispatchWebPlayerCommand(web, "pause", fallbackScript = PAUSE_VIDEO_JS)
                         web.onPause()
                         web.pauseTimers()
+                        timersPaused = true
                     }
                     Lifecycle.Event.ON_RESUME,
                     Lifecycle.Event.ON_START -> {
                         web.resumeTimers()
+                        timersPaused = false
                         web.onResume()
                     }
                     else -> Unit
                 }
             }
             owner.lifecycle.addObserver(observer)
-            onDispose { owner.lifecycle.removeObserver(observer) }
+            onDispose {
+                owner.lifecycle.removeObserver(observer)
+                if (timersPaused) {
+                    DiagnosticsLog.event("EmbedWebView resume timers on dispose")
+                    web.resumeTimers()
+                }
+            }
         }
     }
 
@@ -1553,6 +1584,7 @@ fun EmbedWebView(
             )
             }
         }
+        androidx.compose.runtime.key(rendererGeneration) {
         AndroidView(
             modifier = Modifier.fillMaxSize(),
             factory = { ctx ->
@@ -1800,8 +1832,14 @@ fun EmbedWebView(
             onRelease = { view ->
                 val web = view as? WebView ?: return@AndroidView
                 if (webView === web) webView = null
-                DiagnosticsLog.event("EmbedWebView release url=${web.url ?: "none"} size=${web.width}x${web.height}")
-                stopWebPlayback(web)
+                val rendererGone = deadRendererViews.remove(web)
+                DiagnosticsLog.event(
+                    "EmbedWebView release url=${web.url ?: "none"} size=${web.width}x${web.height} " +
+                        "rendererGone=$rendererGone",
+                )
+                // A dead renderer has no page to pause or blank, and a load would only ask the
+                // view to start another one.
+                if (!rendererGone) stopWebPlayback(web)
                 web.removeJavascriptInterface("AniliProgress")
                 web.clearHistory()
                 web.removeAllViews()
@@ -1811,6 +1849,7 @@ fun EmbedWebView(
                 web.destroy()
             },
         )
+        }
         }
 
         CompiledSeparately {
@@ -3729,7 +3768,13 @@ private fun stopWebPlayback(webView: WebView) {
     DiagnosticsLog.event("EmbedWebView stop playback url=${webView.url ?: "none"}")
     dispatchWebPlayerCommand(webView, "pause", fallbackScript = PAUSE_VIDEO_JS)
     webView.onPause()
-    webView.pauseTimers()
+    // No pauseTimers() here. It is process-wide: it stopped JavaScript timers in every WebView the
+    // app owns — the Pahe, Flixcloud and Hanime resolvers, both challenge dialogs and the login
+    // page — and the only resumeTimers() lived in a mounted embed's lifecycle observer, so after
+    // backing out of an embed episode those stalled until the next embed opened (Pahe's clearance
+    // timed out into its cooldown, Flixcloud hit its TV timeout). onPause(), about:blank and the
+    // destroy() that follows already stop this page; the global pair belongs to the lifecycle
+    // observer alone, where the app going to the background is the reason for it.
     webView.stopLoading()
     webView.loadUrl("about:blank")
 }

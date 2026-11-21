@@ -4,7 +4,10 @@ import android.annotation.SuppressLint
 import android.graphics.Color
 import android.net.Uri
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.view.KeyEvent
+import android.view.View
 import android.view.ViewGroup
 import android.webkit.CookieManager
 import android.webkit.JavascriptInterface
@@ -46,6 +49,7 @@ import androidx.compose.ui.window.DialogProperties
 import com.anilili.data.remote.ALLANIME_USER_AGENT
 import com.anilili.data.remote.AllAnimeCaptchaCoordinator
 import com.anilili.data.remote.AllAnimeCaptchaSolution
+import com.anilili.diagnostics.CrashReporter
 import com.anilili.diagnostics.DiagnosticsLog
 import com.anilili.diagnostics.WebViewProcessController
 import com.anilili.ui.adaptive.focusFill
@@ -131,7 +135,13 @@ private fun CaptchaWebView(
     AndroidView(
         modifier = Modifier.fillMaxSize().focusProperties { canFocus = true },
         factory = { context ->
+            // Guarded like every other WebView in the app. During a System WebView update, or
+            // with the provider disabled, the constructor throws inside composition.
+            try {
             WebView(context).apply {
+                // Timers are paused process-wide, never per view; a pause left behind by the
+                // embed player would freeze the check's script.
+                resumeTimers()
                 // A WebView that has focus consumes Back itself. Give the remote its way out
                 // before the key ever reaches Compose.
                 setOnKeyListener { _, keyCode, event ->
@@ -203,9 +213,16 @@ private fun CaptchaWebView(
                     DiagnosticsLog.event("AllAnime CAPTCHA rejected unexpected host")
                 }
             }
+            } catch (e: Throwable) {
+                CrashReporter.logNonFatal("System WebView unavailable; AllAnime CAPTCHA skipped", e)
+                // Posted: cancelling clears the coordinator's state, which must not change in the
+                // middle of the composition that is building this view.
+                Handler(Looper.getMainLooper()).post { currentOnCancel() }
+                View(context)
+            }
         },
         onRelease = { view ->
-            val web = view as WebView
+            val web = view as? WebView ?: return@AndroidView
             DiagnosticsLog.event("AllAnime CAPTCHA WebView release")
             web.stopLoading()
             web.removeJavascriptInterface(BRIDGE_NAME)
