@@ -123,6 +123,21 @@ internal class PlaybackCacheBypassGate {
 internal fun shouldParkPlaybackOnExit(isTv: Boolean): Boolean = isTv
 
 /**
+ * Whether pressing play on an idle player needs prepare() before play() (#61).
+ *
+ * A parked player — television exits pause, then stop ([shouldParkPlaybackOnExit]) — sits in
+ * STATE_IDLE still holding its item, and `play()` alone does nothing from idle. An idle player
+ * with nothing held must not prepare: there is nothing to revive, and the queue it would build
+ * belongs to the next setMediaItem.
+ *
+ * Every path that can meet a parked player makes this one decision the same way: the player
+ * surface's toggle, the revival when the player comes back into view (ON_START after the
+ * screensaver or Home), and the media-button handling in this service.
+ */
+internal fun playerPreparesWhenIdle(playbackState: Int, hasMediaItem: Boolean): Boolean =
+    playbackState == Player.STATE_IDLE && hasMediaItem
+
+/**
  * Owns the app playback player so playback survives activity backgrounding and exposes Android
  * notification, lock-screen, headset, Bluetooth, and Cast controls through a MediaSession.
  */
@@ -438,6 +453,24 @@ class PlaybackService : MediaSessionService() {
                         DiagnosticsLog.event(
                             "PlaybackService ignored background media-button resume key=${key?.keyCode}",
                         )
+                        return true
+                    }
+                    // A parked player (#61) — idle but still holding its item — cannot be resumed
+                    // by the default path: play() does nothing from idle. A key here can only come
+                    // from a physical button (the notification's play arrives as a controller
+                    // command, not a key event), so preparing first is exactly what the press
+                    // means: the remote's media Play against the screensaver or Home park, making
+                    // the same decision the player surface's toggle does.
+                    val buttonPlayer = session.player
+                    if (isResumeKey &&
+                        playerPreparesWhenIdle(
+                            buttonPlayer.playbackState,
+                            buttonPlayer.currentMediaItem != null,
+                        )
+                    ) {
+                        DiagnosticsLog.event("PlaybackService media-button resume prepares the parked player")
+                        buttonPlayer.prepare()
+                        buttonPlayer.play()
                         return true
                     }
                     // Media3 1.8.1 caches whether its notification controller is connected, then
@@ -1088,7 +1121,8 @@ class PlaybackService : MediaSessionService() {
          * screen nobody is watching. `stop()` is what releases them; Media3 keeps the playlist and
          * the position through it, so re-entering the episode re-prepares from where it stopped
          * (PlayerSurface's reattachingToLoadedItem path) and in-app Play revives it with a prepare
-         * (PlayerSurface's playerTogglePreparesWhenIdle). The pause first is what stops the sound
+         * ([playerPreparesWhenIdle] — one decision shared by the toggle, the ON_START revival and
+         * the media buttons here). The pause first is what stops the sound
          * the instant the screen leaves and leaves `playWhenReady` deterministically false for the
          * parked player. The loaded-session notification resume is given up with it — a television
          * has no notification to resume from, and media-key resume is suppressed here exactly as
@@ -1205,11 +1239,11 @@ private fun handleMediaButtonLocally(player: Player, key: KeyEvent?): Boolean {
     if (key == null) return true
     if (key.action != KeyEvent.ACTION_DOWN) return true
     when (key.keyCode) {
-        KeyEvent.KEYCODE_MEDIA_PLAY -> player.play()
+        KeyEvent.KEYCODE_MEDIA_PLAY -> resumePlayer(player)
         KeyEvent.KEYCODE_MEDIA_PAUSE -> player.pause()
         KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE,
         KeyEvent.KEYCODE_HEADSETHOOK,
-        -> if (player.isPlaying) player.pause() else player.play()
+        -> if (player.isPlaying) player.pause() else resumePlayer(player)
         KeyEvent.KEYCODE_MEDIA_NEXT -> player.seekToNext()
         KeyEvent.KEYCODE_MEDIA_PREVIOUS -> player.seekToPrevious()
         KeyEvent.KEYCODE_MEDIA_FAST_FORWARD -> player.seekForward()
@@ -1218,6 +1252,17 @@ private fun handleMediaButtonLocally(player: Player, key: KeyEvent?): Boolean {
         else -> return false
     }
     return true
+}
+
+/**
+ * Starts playback, preparing first when the player is parked (#61) — idle but still holding its
+ * item, where play() alone does nothing ([playerPreparesWhenIdle]). The same decision the player
+ * surface's toggle and the ON_START revival make; without it a media-key resume stayed dead
+ * against a parked player.
+ */
+private fun resumePlayer(player: Player) {
+    if (playerPreparesWhenIdle(player.playbackState, player.currentMediaItem != null)) player.prepare()
+    player.play()
 }
 
 private fun Int.stateName(): String = when (this) {

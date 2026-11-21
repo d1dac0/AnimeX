@@ -91,7 +91,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
-import androidx.lifecycle.LifecycleOwner
 import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
 import com.anilili.data.model.EpisodeItem
@@ -3803,12 +3802,6 @@ private val PAUSE_VIDEO_JS = """
 
 private fun android.app.Activity?.inPictureInPicture(): Boolean =
     this != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.N && isInPictureInPictureMode
-
-private tailrec fun Context.findLifecycleOwner(): LifecycleOwner? = when (this) {
-    is LifecycleOwner -> this
-    is ContextWrapper -> baseContext.findLifecycleOwner()
-    else -> null
-}
 
 private fun isInSkipWindow(positionMs: Long, startMs: Long?, endMs: Long?): Boolean {
     val start = startMs ?: 0L

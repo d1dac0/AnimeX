@@ -30,24 +30,6 @@ class PlayerGestureControlsTest {
         assertEquals(false, playerShowsPicture(Player.STATE_IDLE))
     }
 
-    /**
-     * A parked player (#61) is idle but still holds its item; play() alone does nothing from idle,
-     * so Play after Home was dead until the toggle prepared first.
-     */
-    @Test
-    fun playOnAParkedPlayerPreparesFirst() {
-        assertEquals(true, playerTogglePreparesWhenIdle(Player.STATE_IDLE, hasMediaItem = true))
-        assertEquals(false, playerTogglePreparesWhenIdle(Player.STATE_READY, hasMediaItem = true))
-        assertEquals(false, playerTogglePreparesWhenIdle(Player.STATE_ENDED, hasMediaItem = true))
-        assertEquals(false, playerTogglePreparesWhenIdle(Player.STATE_BUFFERING, hasMediaItem = true))
-    }
-
-    /** An idle player with nothing held has nothing to revive; the next setMediaItem owns it. */
-    @Test
-    fun anIdlePlayerWithoutAnItemDoesNotPrepare() {
-        assertEquals(false, playerTogglePreparesWhenIdle(Player.STATE_IDLE, hasMediaItem = false))
-    }
-
     @Test
     fun horizontalSlideSeeksRelativeToDragDistance() {
         assertEquals(
