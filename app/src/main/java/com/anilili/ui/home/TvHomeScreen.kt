@@ -388,7 +388,7 @@ internal fun TvHomeContent(
             verticalArrangement = Arrangement.spacedBy(20.dp),
         ) {
             if (hero != null) {
-                item(key = "tv-hero") {
+                item(key = "tv-hero", contentType = "hero") {
                     TvHero(
                         media = hero,
                         backdrop = hero.wideHeroArtwork() ?: heroBackdrops[hero.id],
@@ -412,7 +412,7 @@ internal fun TvHomeContent(
                 val onFocusUp = returnToHero.takeIf { row == firstRail && hero != null }
                 val blockDown = row == lastRail
                 when (row) {
-                    HomeRow.CONTINUE -> item(key = "continue-watching") {
+                    HomeRow.CONTINUE -> item(key = "continue-watching", contentType = "continue") {
                         // Every title in progress, not the first handful. The row used to be cut at
                         // twelve here, which is not a row length but a hidden list: a thirteenth
                         // show was simply absent, and the only way to reach it was to remove
@@ -435,7 +435,7 @@ internal fun TvHomeContent(
                             )
                         }
                     }
-                    HomeRow.FOR_YOU -> item(key = "for-you") {
+                    HomeRow.FOR_YOU -> item(key = "for-you", contentType = "media-rail") {
                         Box(Modifier.tourTarget(TourTarget.FOR_YOU)) {
                             TvMediaRail(
                                 title = row.label(isTv = true),
@@ -447,7 +447,7 @@ internal fun TvHomeContent(
                             )
                         }
                     }
-                    HomeRow.BECAUSE -> item(key = "because-${because?.seed?.id}") {
+                    HomeRow.BECAUSE -> item(key = "because-${because?.seed?.id}", contentType = "media-rail") {
                         Box(Modifier.tourTarget(TourTarget.BECAUSE)) {
                             TvMediaRail(
                                 title = "Because you watched ${because?.seed?.title?.preferred}",
@@ -459,7 +459,7 @@ internal fun TvHomeContent(
                             )
                         }
                     }
-                    HomeRow.TOP_BY_YEAR -> item(key = row.key) {
+                    HomeRow.TOP_BY_YEAR -> item(key = row.key, contentType = "year-rail") {
                         LaunchedEffect(Unit) { onSelectYear(yearTopRated.year) }
                         TvYearTopRatedRail(
                             state = yearTopRated,
@@ -473,7 +473,7 @@ internal fun TvHomeContent(
                     }
                     else -> {
                         val section = row.catalogSection ?: return@forEach
-                        item(key = row.key) {
+                        item(key = row.key, contentType = "media-rail") {
                             TvMediaRail(
                                 title = row.label(isTv = true),
                                 media = data.section(section),
@@ -908,7 +908,7 @@ internal fun TvMediaRail(
                 contentPadding = PaddingValues(horizontal = TvPagePadding, vertical = 10.dp),
                 horizontalArrangement = Arrangement.spacedBy(18.dp),
             ) {
-                itemsIndexed(media, key = { _, item -> item.id }) { index, item ->
+                itemsIndexed(media, key = { _, item -> item.id }, contentType = { _, _ -> "card" }) { index, item ->
                     TvMediaCard(
                         media = item,
                         onClick = {
@@ -939,7 +939,7 @@ internal fun TvMediaRail(
                     // Deliberately not focusable: it is a note that the rail continues, not somewhere
                     // to land. A remote that could stop on it would be stopping on something that
                     // disappears from under it the moment the page arrives.
-                    item(key = "loading-more") {
+                    item(key = "loading-more", contentType = "loading") {
                         Box(
                             Modifier
                                 .width(TvMediaCardWidth)
@@ -1272,7 +1272,7 @@ internal fun TvContinueRail(
                 contentPadding = PaddingValues(horizontal = TvPagePadding, vertical = 10.dp),
                 horizontalArrangement = Arrangement.spacedBy(18.dp),
             ) {
-                itemsIndexed(history, key = { _, item -> item.anilistId }) { index, entry ->
+                itemsIndexed(history, key = { _, item -> item.anilistId }, contentType = { _, _ -> "continue-card" }) { index, entry ->
                     TvContinueCard(
                         entry = entry,
                         nextRelease = nextReleases[entry.anilistId],
