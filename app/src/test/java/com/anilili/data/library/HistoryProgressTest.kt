@@ -138,6 +138,57 @@ class HistoryProgressTest {
     }
 
     @Test
+    fun `confirmed playback of a later episode moves the row onto it and keeps the earlier clock`() {
+        // The reported bug: the row pointed at episode 5, the viewer watched episode 7 for ten
+        // minutes, and after a restart Continue Watching went back to 5 — the row's episode only
+        // moved on resolve, so a session that never re-resolved left it behind forever.
+        val row = current.copy(episodeNumber = 5.0)
+            .withEpisodeProgress(5.0, positionMs = 700_000, durationMs = 1_400_000)
+        val playing = row.withEpisodeProgress(
+            episodeNumber = 7.0,
+            positionMs = 600_000,
+            durationMs = 1_440_000,
+            followsPlayback = true,
+        )
+
+        assertEquals(7.0, playing.episodeNumber, 0.0)
+        assertEquals(600_000L, playing.positionMs)
+        assertEquals(1_440_000L, playing.durationMs)
+        assertEquals("episode 5's clock is not thrown away by the move", 700_000L, playing.resumeFor(5.0)?.positionMs)
+    }
+
+    @Test
+    fun `a bare clock for another episode still never moves the row`() {
+        // The evidence a plain progress report carries is one report: the tail of a torn-down
+        // player can produce it, and that must not walk the row backwards. Only playback observed
+        // actually running earns the move, which is what the flag is for.
+        val row = current.copy(episodeNumber = 5.0)
+        val moved = row.withEpisodeProgress(7.0, positionMs = 600_000, durationMs = 1_440_000)
+
+        assertEquals(5.0, moved.episodeNumber, 0.0)
+        assertEquals(600_000L, moved.resumeFor(7.0)?.positionMs)
+        assertEquals(
+            "the row itself stayed where it was, the clock went into the resume points",
+            row.copy(resumePoints = moved.resumePoints),
+            moved,
+        )
+    }
+
+    @Test
+    fun `an episode already watched is not moved onto by even confirmed playback`() {
+        val watched = current.copy(watchedEpisodes = setOf(7.0))
+        assertSame(
+            watched,
+            watched.withEpisodeProgress(
+                episodeNumber = 7.0,
+                positionMs = 600_000,
+                durationMs = 1_440_000,
+                followsPlayback = true,
+            ),
+        )
+    }
+
+    @Test
     fun `advancing past a watched episode keeps every other episode's position`() {
         val entry = current.copy(episodeNumber = 1.0)
             .withEpisodeProgress(1.0, positionMs = 1_200_000, durationMs = 1_440_000)

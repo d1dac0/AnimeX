@@ -1867,7 +1867,41 @@ class WatchViewModel : ViewModel() {
         val now = System.currentTimeMillis()
         if (now - lastProgressSave < 8_000) return
         lastProgressSave = now
-        LibraryStore.updateProgress(anilistId, data.current.number, positionMs, durationMs)
+        // The row follows the episode actually playing: progress is only ever written for a stream
+        // the screen chose, so past the two-reports bar above a clock for a different episode means
+        // playback has outgrown wherever the row was left, and it moves rather than waiting for a
+        // resolve that may never come to re-anchor it.
+        LibraryStore.updateProgress(
+            anilistId,
+            data.current.number,
+            positionMs,
+            durationMs,
+            followsPlayback = progressReportsForStream > 1,
+        )
+    }
+
+    /**
+     * The player's parting report as it is torn down, saved past the periodic throttle: the throttle
+     * runs eight seconds behind, so the position the viewer closed the app on would otherwise be
+     * whatever the last tick managed to keep. The report carries the stream the controller actually
+     * holds, so it is only kept when that is still the stream the screen chose — the parting clock
+     * of an episode the screen has since left belongs to that episode, and cannot be attributed
+     * here. It counts as playback having run, so a row still pointing elsewhere follows it.
+     */
+    fun onFinalProgress(streamUrl: String, positionMs: Long, durationMs: Long) {
+        val data = (_state.value as? UiState.Success)?.data ?: return
+        if (data.chosenStream?.url != streamUrl || positionMs <= 0) return
+        lastKnownPositionMs = positionMs
+        lastKnownDurationMs = durationMs
+        lastKnownNumber = data.current.number
+        lastProgressSave = System.currentTimeMillis()
+        LibraryStore.updateProgress(
+            anilistId,
+            data.current.number,
+            positionMs,
+            durationMs,
+            followsPlayback = true,
+        )
     }
 
     /**
