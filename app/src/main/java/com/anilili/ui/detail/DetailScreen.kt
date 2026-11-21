@@ -87,10 +87,8 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.input.InputMode
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalInputModeManager
 import androidx.compose.ui.semantics.disabled
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontStyle
@@ -171,7 +169,6 @@ import com.anilili.ui.components.orderEpisodeBlocks
 import com.anilili.ui.components.orderEpisodes
 import com.anilili.ui.components.toggleEpisodeWatched
 import java.time.format.DateTimeFormatter
-import kotlinx.coroutines.android.awaitFrame
 import com.anilili.util.cached
 import dev.chrisbanes.haze.hazeSource
 import dev.chrisbanes.haze.HazeState
@@ -267,28 +264,12 @@ private fun DetailScreenBody(
     val primaryActionFocusRequester = remember { FocusRequester() }
     val detailActionsReady = state is UiState.Success
     val device = LocalAppDeviceProfile.current
-    val inputModeManager = LocalInputModeManager.current
     var backFocusEnabled by remember(animeId, device.isTv) { mutableStateOf(!device.isTv) }
 
-    // An arrival from the player hands the cursor to the episode strip instead, so the primary
-    // request below must not fire: the two would race and whichever landed last would win, which
-    // is the Watch button half the time. Read off the same state the page renders, so the two
-    // effects see the same answer in one recomposition.
-    val arrivalEpisodePresent = focusEpisode?.let { target ->
-        (state as? UiState.Success)?.data?.episodes?.any { it.displayNumber == target } == true
-    } == true
-
-    // Mouse navigation leaves Compose in Touch mode. Keep the top-left Back button out of the
-    // initial TV focus search, switch to Keyboard mode, and request the primary action once its
-    // lazy row exists. Back becomes focusable again as soon as an action actually receives focus.
-    LaunchedEffect(detailActionsReady, device.isTv, arrivalEpisodePresent) {
-        if (device.isTv && detailActionsReady && !arrivalEpisodePresent) {
-            val keyboardMode = inputModeManager.requestInputMode(InputMode.Keyboard)
-            awaitFrame()
-            runCatching { primaryActionFocusRequester.requestFocus() }
-            DiagnosticsLog.event("Detail primary action focus requested keyboardMode=$keyboardMode")
-        }
-    }
+    // The television's first focus — the Watch button, the list button when Watch is disabled, or
+    // the episode the player's Back named — is placed by TvDetailContent, which is the only part
+    // of the page that knows whether Watch can take it. A single request from here, swallowed when
+    // it failed, left an announced title with nothing focused at all.
 
     if (device.isTv) {
         when (val s = state) {
