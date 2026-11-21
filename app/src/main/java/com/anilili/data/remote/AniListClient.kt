@@ -67,6 +67,11 @@ class AniListClient(
     private val client: OkHttpClient,
     private val json: Json,
     private val endpoint: String = ANILIST_URL,
+    /**
+     * Where the signed-in token comes from. Defaults to [AuthManager]; injected for tests, which
+     * cannot build the real token store — the same seam MalClient's accessTokenProvider opens.
+     */
+    private val tokenProvider: () -> String? = { AuthManager.current() },
 ) {
     private val jsonMedia = "application/json; charset=utf-8".toMediaType()
 
@@ -911,6 +916,51 @@ class AniListClient(
     }
 
     /**
+     * Just the media ids the user is actively watching or rewatching — the only question the
+     * release sync asks (#76). It used to fetch the whole [userAnimeList] collection, every
+     * status with every [mediaListFields] field on every entry, and throw away all but CURRENT
+     * and REPEATING: for a large account that was a multi-MB response and object graph decoded
+     * next to a playing player's buffer. Asking AniList to do the filtering and requesting
+     * `media { id }`-level fields brings the response back into the KBs.
+     *
+     * `status` is still read per entry: a MediaListCollection answer can carry custom lists, and
+     * an entry sitting only on one of those has no status-list status — the filter that the sync
+     * applied to the full collection (an id counts only when the entry itself says CURRENT or
+     * REPEATING) is kept here, so the tracked set is the same one the sync always derived.
+     */
+    suspend fun trackedAiringMediaIds(userId: Int): Set<Int> = withContext(Dispatchers.IO) {
+        val gql = """
+            query (${'$'}userId: Int) {
+              MediaListCollection(userId: ${'$'}userId, type: ANIME, status_in: [CURRENT, REPEATING]) {
+                lists {
+                  entries {
+                    status
+                    media { id }
+                  }
+                }
+              }
+            }
+        """.trimIndent()
+        val vars = buildJsonObject { put("userId", userId) }
+        val text = post(gql, vars, authenticated = true)
+        val lists = json.parseToJsonElement(text).jsonObject["data"]?.jsonObject
+            ?.get("MediaListCollection")?.jsonObject
+            ?.get("lists") as? JsonArray ?: return@withContext emptySet()
+        val tracked = hashSetOf<Int>()
+        for (list in lists) {
+            val entries = (list as? JsonObject)?.get("entries") as? JsonArray ?: continue
+            for (entry in entries) {
+                val obj = entry as? JsonObject ?: continue
+                if (obj["status"]?.jsonPrimitive?.contentOrNull !in TRACKED_AIRING_STATUSES) continue
+                val mediaId = (obj["media"] as? JsonObject)?.get("id")?.jsonPrimitive?.intOrNull
+                    ?: continue
+                tracked += mediaId
+            }
+        }
+        tracked
+    }
+
+    /**
      * The account's activity per day, as AniList's own profile heatmap draws it: about six months of
      * days, each with how many list activities it held. Keyed by epoch day; days with none are absent.
      *
@@ -1376,7 +1426,7 @@ class AniListClient(
                 // to be nothing else; sending anilist.co here would be a lie told to no purpose,
                 // because the filter cannot tell the difference.
                 .header("Referer", REFERER)
-            val token = AuthManager.current()
+            val token = tokenProvider()
             if (authenticated && token == null) {
                 AnililiError.ACCOUNT_SESSION_EXPIRED.raise(
                     AccountService.ANILIST.label,
@@ -1468,6 +1518,8 @@ class AniListClient(
         const val ANILIST_URL = "https://graphql.anilist.co"
         private val MEDIA_LIST_STATUSES =
             setOf("CURRENT", "REPEATING", "PLANNING", "PAUSED", "COMPLETED", "DROPPED")
+        /** AniList's airing pushes only cover the statuses a viewer is actively watching (#76). */
+        internal val TRACKED_AIRING_STATUSES = setOf("CURRENT", "REPEATING")
         /** AniList recommends across media types; these formats mark the ones we cannot play. */
         private val READING_FORMATS = setOf("MANGA", "NOVEL", "ONE_SHOT")
         private const val MAX_STUDIO_MEDIA_PAGES = 20

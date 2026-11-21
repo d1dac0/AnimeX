@@ -12,6 +12,7 @@ import android.content.pm.PackageManager
 import android.os.Build
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
+import androidx.work.BackoffPolicy
 import androidx.work.Constraints
 import androidx.work.CoroutineWorker
 import androidx.work.ExistingPeriodicWorkPolicy
@@ -29,6 +30,7 @@ import com.anilili.data.library.LibraryStore
 import com.anilili.data.model.Media
 import com.anilili.data.settings.SettingsStore
 import com.anilili.diagnostics.DiagnosticsLog
+import com.anilili.playback.PlaybackStatus
 import com.anilili.ui.nav.Routes
 import java.util.concurrent.TimeUnit
 import kotlinx.serialization.Serializable
@@ -241,12 +243,20 @@ object ReleaseSyncScheduler {
     private const val IMMEDIATE_NAME = "automatic-release-sync-now"
     private const val SYNC_STATE_PREFERENCES = "automatic-release-sync-state"
     private const val LAST_SUCCESS_UTC_MS = "last-success-utc-ms"
+
+    /**
+     * A retry for a sync that stood aside for playback (#76) is not a failure, but WorkManager's
+     * default exponential backoff treats it as one: a two-hour Watch session would push the next
+     * attempt hours out, the same cliff the episode export hit and fixed with a linear backoff.
+     */
+    internal const val DEFERRAL_BACKOFF_SECONDS = 15L
     private val network = Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build()
 
     fun schedule(context: Context) {
         val request = PeriodicWorkRequestBuilder<ReleaseSyncWorker>(3, TimeUnit.HOURS)
             .addTag("release-sync")
             .setConstraints(network)
+            .setBackoffCriteria(BackoffPolicy.LINEAR, DEFERRAL_BACKOFF_SECONDS, TimeUnit.SECONDS)
             .build()
         WorkManager.getInstance(context.applicationContext).enqueueUniquePeriodicWork(
             PERIODIC_NAME,
@@ -287,6 +297,7 @@ object ReleaseSyncScheduler {
         val request = OneTimeWorkRequestBuilder<ReleaseSyncWorker>()
             .addTag("release-sync")
             .setConstraints(network)
+            .setBackoffCriteria(BackoffPolicy.LINEAR, DEFERRAL_BACKOFF_SECONDS, TimeUnit.SECONDS)
             .build()
         DiagnosticsLog.event("release_sync", "work.enqueued", mapOf("reason" to reason, "policy" to policy.name))
         WorkManager.getInstance(context.applicationContext).enqueueUniqueWork(
@@ -303,6 +314,16 @@ internal fun shouldRunStartupReleaseSync(nowUtcMs: Long, lastSuccessUtcMs: Long)
 internal fun releaseSyncMediaIds(ids: Iterable<Int>): List<Int> =
     ids.filter { it > 0 }.distinct().sorted()
 
+/**
+ * True while a playback session is open: a release sync must not complete next to the player (#76).
+ *
+ * The sync fetches the tracked-list response and rebuilds every alarm while the player holds its
+ * own buffers in the same heap. It has no deadline, so it stands aside instead of competing —
+ * WorkManager's backoff brings it back when the session closes. Kept as a pure decision on the
+ * [PlaybackStatus.sessionActive] value so the guard is testable without WorkManager.
+ */
+internal fun releaseSyncYieldsToPlayback(sessionActive: Boolean): Boolean = sessionActive
+
 class ReleaseSyncWorker(
     context: Context,
     params: WorkerParameters,
@@ -311,6 +332,13 @@ class ReleaseSyncWorker(
         if (!SettingsStore.releaseNotifications.value) {
             AutomaticReleaseManager.cancelAll()
             return Result.success()
+        }
+        // A sync that stands aside is not a failure: WorkManager retries on its backoff schedule,
+        // which [ReleaseSyncScheduler.DEFERRAL_BACKOFF_SECONDS] keeps cheap. Read as a value, not
+        // a collect — no polling loop; the next attempt re-asks.
+        if (releaseSyncYieldsToPlayback(PlaybackStatus.sessionActive.value)) {
+            DiagnosticsLog.event("release_sync", "work.deferred_playback")
+            return Result.retry()
         }
         return try {
             val repo = AppGraph.repository
@@ -321,8 +349,7 @@ class ReleaseSyncWorker(
             if (AuthManager.isLoggedIn) {
                 // The notification feed itself is polled by AiringPollWorker on a much tighter
                 // cadence — this worker only decides which shows still need a local alarm.
-                val aniListTracked = anilistTrackedMedia(repo)
-                val aniListIds = aniListTracked.mapTo(hashSetOf()) { it.id }
+                val aniListIds = anilistTrackedMedia(repo)
                 // AniList notifications are now the canonical push source for logged-in users.
                 // Keep local alarms only for device-only saves that AniList cannot notify about.
                 AutomaticReleaseManager.sync(localSaved.filterNot { it.id in aniListIds })
@@ -345,17 +372,14 @@ class ReleaseSyncWorker(
         }
     }
 
-    private suspend fun anilistTrackedMedia(repo: com.anilili.data.MiruroRepository): List<Media> {
-        val viewerId = AuthManager.viewerId() ?: runCatching { repo.viewer() }.getOrNull()?.id ?: return emptyList()
-        // AniList's airing pushes cover shows the user is actively watching/rewatching. Planning,
-        // paused, and favourite-only titles still need the app's local release alarm.
-        val activeStatuses = setOf("CURRENT", "REPEATING")
-        val listMedia = runCatching { repo.userAnimeList(viewerId) }.getOrNull()
-            ?.lists.orEmpty()
-            .flatMap { it.entries }
-            .distinctBy { it.id }
-            .filter { it.status in activeStatuses }
-            .mapNotNull { it.media }
-        return listMedia.distinctBy { it.id }
+    /**
+     * The media ids AniList's airing pushes already cover: the account's CURRENT and REPEATING
+     * titles, asked for as ids only (#76). Planning, paused, and favourite-only titles still need
+     * the app's local release alarm, so anything else is deliberately left out — the same set the
+     * full-collection fetch used to derive, minus the multi-MB decode.
+     */
+    private suspend fun anilistTrackedMedia(repo: com.anilili.data.MiruroRepository): Set<Int> {
+        val viewerId = AuthManager.viewerId() ?: runCatching { repo.viewer() }.getOrNull()?.id ?: return emptySet()
+        return runCatching { repo.trackedAiringMediaIds(viewerId) }.getOrDefault(emptySet())
     }
 }
