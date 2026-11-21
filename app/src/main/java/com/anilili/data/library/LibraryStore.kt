@@ -20,6 +20,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.builtins.serializer
 import kotlinx.serialization.json.Json
 
@@ -34,6 +35,12 @@ object LibraryStore {
     private const val KEY_REMOTE_SCORES = "remote_scores"
     private const val KEY_DISMISSED_REMOTE_HISTORY = "dismissed_remote_history"
     private const val KEY_PENDING_SAVED_SYNC = "pending_saved_sync"
+
+    /**
+     * Set once every stored history row carries [HistoryEntry.watchedEpisodes], after which the
+     * legacy seed has nothing left to do and its second parse of the history is skipped (#86).
+     */
+    private const val KEY_LEGACY_HISTORY_SEEDED = "history_legacy_seeded"
     private const val MAX_HISTORY = 100
     private const val REMOTE_REFRESH_INTERVAL_MS = 30_000L
 
@@ -87,15 +94,29 @@ object LibraryStore {
         appContext = context.applicationContext
         prefs = appContext.getSharedPreferences("miruro_library", Context.MODE_PRIVATE)
         val rawHistory = prefs.getString(KEY_HISTORY, null)
-        val storedHistory = seedLegacyWatchedEpisodes(
+        val alreadySeeded = prefs.getBoolean(KEY_LEGACY_HISTORY_SEEDED, false)
+        val seed = seedLegacyHistory(
             decodeList(rawHistory, HistoryEntry.serializer()),
             rawHistory,
+            alreadySeeded,
         )
+        val storedHistory = seed.entries
         // A list persisted by an older build can already contain a repeat; drop it on the way in.
         val orderedHistory = mergedHistory(storedHistory, emptyList(), MAX_HISTORY)
         _history.value = orderedHistory
-        if (orderedHistory != storedHistory) {
-            persist(KEY_HISTORY, orderedHistory, HistoryEntry.serializer())
+        // The seed is recorded as done only once nothing on disk could still need it: the history
+        // read in full, and any legacy row written back in the same edit as the mark, so the two
+        // reach the disk together or not at all.
+        val markSeeded = !alreadySeeded && seed.settled
+        if (orderedHistory != storedHistory || (markSeeded && seed.legacyRows > 0)) {
+            val edit = prefs.edit().putString(
+                KEY_HISTORY,
+                json.encodeToString(ListSerializer(HistoryEntry.serializer()), orderedHistory),
+            )
+            if (markSeeded) edit.putBoolean(KEY_LEGACY_HISTORY_SEEDED, true)
+            edit.apply()
+        } else if (markSeeded) {
+            prefs.edit().putBoolean(KEY_LEGACY_HISTORY_SEEDED, true).apply()
         }
         _watchlist.value = decodeList(prefs.getString(KEY_WATCHLIST, null), WatchlistEntry.serializer())
         _remoteStatuses.value = decodeList(
