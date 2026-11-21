@@ -119,6 +119,7 @@ import com.anilili.ui.adaptive.TvCardCornerShape
 import com.anilili.ui.adaptive.TvPanelCornerShape
 import com.anilili.ui.adaptive.TvSmallCardCornerShape
 import com.anilili.ui.adaptive.TvFocusMemory
+import com.anilili.ui.adaptive.TvRailFocusTracker
 import com.anilili.ui.adaptive.TvFocusTarget
 import com.anilili.ui.adaptive.FocusRingGap
 import com.anilili.ui.adaptive.focusHalo
@@ -170,6 +171,21 @@ private const val TV_HERO_RESTING_HINT_ALPHA = .35f
 private const val TV_HERO_BACKDROP_SETTLE_MS = 600L
 
 /**
+ * The title Home's hero shows: the focused rail card's preview over the spotlight slide, and no
+ * hero at all when the spotlight is empty. A preview hero on a page without a spotlight appeared
+ * above the first rail and vanished again the moment it took focus, which pulled the page about
+ * and left Up from that rail pointing at a hero that was not there.
+ */
+internal fun <T : Any> tvHomeHero(spotlightSlide: T?, railPreview: T?): T? =
+    spotlightSlide?.let { railPreview ?: it }
+
+/**
+ * Room above Home's first row. The hero runs under the floating bar on purpose; a rail must not,
+ * or the bar covers it and Up from it has nothing above to land on.
+ */
+internal fun tvHomeListTopPadding(hasHero: Boolean): Dp = if (hasHero) 0.dp else TvTopNavigationHeight
+
+/**
  * Cinematic 10-foot Home surface. This deliberately lives beside the existing responsive Home
  * implementation so phone and tablet layouts remain unchanged.
  */
@@ -197,7 +213,9 @@ internal fun TvHomeContent(
     var heroHasFocus by remember { mutableStateOf(false) }
     var railPreview by remember(spotlight.map(Media::id)) { mutableStateOf<Media?>(null) }
     val spotlightHero = spotlight.getOrNull(spotlightIndex.coerceIn(0, (spotlight.size - 1).coerceAtLeast(0)))
-    val hero = railPreview ?: spotlightHero
+    val hero = tvHomeHero(spotlightHero, railPreview)
+    // With no spotlight there is no hero to preview in, so a focused card asks for nothing.
+    val previewRail: (Media?) -> Unit = { if (spotlightHero != null) railPreview = it }
 
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
@@ -229,6 +247,32 @@ internal fun TvHomeContent(
     }
     val firstRail = rails.firstOrNull()
     val lastRail = rails.lastOrNull()
+
+    // Removing the last Continue card takes the whole row off the page, and the focus with it; the
+    // rail cannot recover what it no longer draws, so Home does: the hero when there is one,
+    // otherwise whichever rail the list's focus-enter picks. A focus loss reported while the row is
+    // being emptied is the removal itself, not the viewer leaving, so it does not count.
+    val listFocus = remember { FocusRequester() }
+    var continueHeldFocus by remember { mutableStateOf(false) }
+    val historyEmpty = history.isEmpty()
+    val latestHistoryEmpty by rememberUpdatedState(historyEmpty)
+    LaunchedEffect(historyEmpty) {
+        if (!historyEmpty || !continueHeldFocus) return@LaunchedEffect
+        continueHeldFocus = false
+        withFrameNanos { }
+        val toHero = hero != null
+        if (toHero) {
+            returnToHero()
+        } else {
+            runCatching { listFocus.requestFocus() }
+                .onFailure { DiagnosticsLog.throwable("TvHome emptied Continue row had nowhere to hand focus", it) }
+        }
+        DiagnosticsLog.event(
+            category = "focus",
+            name = "tv.home.continue_emptied",
+            attributes = mapOf("to" to if (toHero) "hero" else "list"),
+        )
+    }
 
     // What's new (ui/tour): starts once Home has settled. A row a step points at is scrolled to just
     // under the floating bar; the dice and Settings live in that bar, which shows at the top.
@@ -335,13 +379,16 @@ internal fun TvHomeContent(
             // which is the spotlight at the top of the page and the nearest card anywhere else.
             modifier = modifier
                 .tvFocusTarget(primaryActionFocusTarget)
+                .focusRequester(listFocus)
                 .fillMaxSize()
                 .appCanvas(),
-            contentPadding = PaddingValues(bottom = 40.dp),
+            // With no hero the first rail would sit under the floating bar, and Up from it found
+            // nothing above: the bar, and with it Search and Settings, could not be reached.
+            contentPadding = PaddingValues(top = tvHomeListTopPadding(hasHero = hero != null), bottom = 40.dp),
             verticalArrangement = Arrangement.spacedBy(20.dp),
         ) {
             if (hero != null) {
-                item(key = "tv-hero") {
+                item(key = "tv-hero", contentType = "hero") {
                     TvHero(
                         media = hero,
                         backdrop = hero.wideHeroArtwork() ?: heroBackdrops[hero.id],
@@ -360,70 +407,78 @@ internal fun TvHomeContent(
                 }
             }
             rails.forEach { row ->
-                // Up from the top rail belongs to the hero; from any other, to the rail above.
-                val onFocusUp = returnToHero.takeIf { row == firstRail }
+                // Up from the top rail belongs to the hero; from any other, to the rail above. With
+                // no hero, Up from the top rail is left to the focus search, which finds the bar.
+                val onFocusUp = returnToHero.takeIf { row == firstRail && hero != null }
                 val blockDown = row == lastRail
                 when (row) {
-                    HomeRow.CONTINUE -> item(key = "continue-watching") {
+                    HomeRow.CONTINUE -> item(key = "continue-watching", contentType = "continue") {
                         // Every title in progress, not the first handful. The row used to be cut at
                         // twelve here, which is not a row length but a hidden list: a thirteenth
                         // show was simply absent, and the only way to reach it was to remove
                         // another one. The rail is a LazyRow, so a card off screen costs nothing
                         // until the viewer scrolls to it, and the store's own bound (100 entries)
                         // is the only limit worth having.
-                        TvContinueRail(
-                            history = history,
-                            nextReleases = nextReleases,
-                            onResume = onResume,
-                            onOpenDetails = onOpenDetails,
-                            blockDown = blockDown,
-                            onFocusUp = onFocusUp,
-                        )
+                        Box(
+                            Modifier.onFocusChanged { state ->
+                                if (state.hasFocus || !latestHistoryEmpty) continueHeldFocus = state.hasFocus
+                            },
+                        ) {
+                            TvContinueRail(
+                                history = history,
+                                nextReleases = nextReleases,
+                                onResume = onResume,
+                                onOpenDetails = onOpenDetails,
+                                blockDown = blockDown,
+                                focusKey = "home",
+                                onFocusUp = onFocusUp,
+                            )
+                        }
                     }
-                    HomeRow.FOR_YOU -> item(key = "for-you") {
+                    HomeRow.FOR_YOU -> item(key = "for-you", contentType = "media-rail") {
                         Box(Modifier.tourTarget(TourTarget.FOR_YOU)) {
                             TvMediaRail(
                                 title = row.label(isTv = true),
                                 media = personal.forYou,
                                 onAnimeClick = onAnimeClick,
-                                onPreview = { railPreview = it },
+                                onPreview = previewRail,
                                 blockDown = blockDown,
                                 onFocusUp = onFocusUp,
                             )
                         }
                     }
-                    HomeRow.BECAUSE -> item(key = "because-${because?.seed?.id}") {
+                    HomeRow.BECAUSE -> item(key = "because-${because?.seed?.id}", contentType = "media-rail") {
                         Box(Modifier.tourTarget(TourTarget.BECAUSE)) {
                             TvMediaRail(
                                 title = "Because you watched ${because?.seed?.title?.preferred}",
                                 media = because?.items.orEmpty(),
                                 onAnimeClick = onAnimeClick,
-                                onPreview = { railPreview = it },
+                                onPreview = previewRail,
                                 blockDown = blockDown,
                                 onFocusUp = onFocusUp,
                             )
                         }
                     }
-                    HomeRow.TOP_BY_YEAR -> item(key = row.key) {
+                    HomeRow.TOP_BY_YEAR -> item(key = row.key, contentType = "year-rail") {
                         LaunchedEffect(Unit) { onSelectYear(yearTopRated.year) }
                         TvYearTopRatedRail(
                             state = yearTopRated,
                             onSelectYear = onSelectYear,
                             onLoadMore = onLoadMoreYear,
                             onAnimeClick = onAnimeClick,
-                            onPreview = { railPreview = it },
+                            onPreview = previewRail,
                             blockDown = blockDown,
                             onFocusUp = onFocusUp,
                         )
                     }
                     else -> {
                         val section = row.catalogSection ?: return@forEach
-                        item(key = row.key) {
+                        item(key = row.key, contentType = "media-rail") {
                             TvMediaRail(
                                 title = row.label(isTv = true),
                                 media = data.section(section),
                                 onAnimeClick = onAnimeClick,
-                                onPreview = { railPreview = it },
+                                onPreview = previewRail,
                                 blockDown = blockDown,
                                 isLoadingMore = section in loadingMore,
                                 onLoadMore = { onLoadMore(section) },
@@ -791,15 +846,21 @@ internal fun TvMediaRail(
     // the node.
     val railIdentity = media.firstOrNull()?.id
     val railKey = "media:$title:${railIdentity ?: -1}"
-    var lastFocusedIndex by remember(railIdentity) { mutableIntStateOf(TvFocusMemory.indexOf(railKey)) }
+    var lastFocusedIndex by remember(railIdentity) {
+        mutableIntStateOf(TvFocusMemory.indexOf(railKey, media.map(Media::id)))
+    }
     val itemFocusTargets = remember(railIdentity, media.size) { List(media.size) { TvFocusTarget() } }
     val railState = rememberTvRailState()
+    val mediaIds = remember(media) { media.map(Media::id) }
+    val latestMediaIds by rememberUpdatedState(mediaIds)
+    val focusTracker = remember { TvRailFocusTracker() }
+    TvRailFocusRecovery("media", focusTracker, mediaIds, railState, itemFocusTargets)
 
     // Back from a show returns to the row and the card the viewer opened it from, not to the first
     // card of the first rail. Consumed once, so a later recomposition does not drag the cursor back.
+    // Found by the title's id, so a revalidation that reordered the rail still lands on it.
     LaunchedEffect(railKey) {
-        val restore = TvFocusMemory.consumeRestore(railKey) ?: return@LaunchedEffect
-        val index = restore.coerceIn(0, media.lastIndex.coerceAtLeast(0))
+        val index = TvFocusMemory.consumeRestore(railKey, media.map(Media::id)) ?: return@LaunchedEffect
         railState.scrollToItem(index)
         withFrameNanos { }
         itemFocusTargets.getOrNull(index)
@@ -837,6 +898,7 @@ internal fun TvMediaRail(
                             event.key == Key.DirectionUp
                         if (leavingUpwards && onFocusUp != null) onFocusUp() else false
                     }
+                    .onFocusChanged { if (!it.hasFocus) focusTracker.rowLostFocus(latestMediaIds) }
                     .focusProperties {
                         enter = { direction ->
                             tvRailEnterRequester(direction, itemFocusTargets, lastFocusedIndex)
@@ -846,14 +908,19 @@ internal fun TvMediaRail(
                 contentPadding = PaddingValues(horizontal = TvPagePadding, vertical = 10.dp),
                 horizontalArrangement = Arrangement.spacedBy(18.dp),
             ) {
-                itemsIndexed(media, key = { _, item -> item.id }) { index, item ->
+                itemsIndexed(media, key = { _, item -> item.id }, contentType = { _, _ -> "card" }) { index, item ->
                     TvMediaCard(
                         media = item,
-                        onClick = { onAnimeClick(item.id) },
+                        onClick = {
+                            // Leaving for the title's page: Back restores this card.
+                            TvFocusMemory.arm(railKey, index, item.id)
+                            onAnimeClick(item.id)
+                        },
                         onFocused = { focused ->
                             if (focused) {
                                 lastFocusedIndex = index
-                                TvFocusMemory.focused(railKey, index)
+                                TvFocusMemory.focused(railKey, index, item.id)
+                                focusTracker.cardFocused(item.id, index)
                                 onPreview(item)
                             }
                         },
@@ -872,7 +939,7 @@ internal fun TvMediaRail(
                     // Deliberately not focusable: it is a note that the rail continues, not somewhere
                     // to land. A remote that could stop on it would be stopping on something that
                     // disappears from under it the moment the page arrives.
-                    item(key = "loading-more") {
+                    item(key = "loading-more", contentType = "loading") {
                         Box(
                             Modifier
                                 .width(TvMediaCardWidth)
@@ -891,6 +958,41 @@ internal fun TvMediaRail(
                 }
             }
         }
+    }
+}
+
+/**
+ * Puts the cursor back in a rail whose focused card was just removed from under it — the remove
+ * button on a Continue card, a revalidation that dropped the title. Compose clears focus when the
+ * focused node detaches, and nothing else would pick it up: the next press re-entered from the
+ * root. The cursor goes to the neighbour that took the card's place, or to the new last card.
+ *
+ * An emptied rail is left to its host, which usually stops drawing it at all.
+ */
+@Composable
+private fun TvRailFocusRecovery(
+    kind: String,
+    tracker: TvRailFocusTracker,
+    keys: List<Any>,
+    railState: LazyListState,
+    targets: List<TvFocusTarget>,
+) {
+    LaunchedEffect(keys) {
+        val index = tracker.recoveryIndex(keys) ?: return@LaunchedEffect
+        railState.scrollToItem(index)
+        withFrameNanos { }
+        val target = targets.getOrNull(index)?.takeIf(TvFocusTarget::isAttached)
+        if (target != null) runCatching { target.requester.requestFocus() }
+        DiagnosticsLog.event(
+            category = "focus",
+            name = "tv.rail.focus_recovered",
+            attributes = mapOf(
+                "rail" to kind,
+                "index" to index,
+                "size" to keys.size,
+                "landed" to (target?.holdsFocus == true),
+            ),
+        )
     }
 }
 
@@ -1088,35 +1190,47 @@ internal fun TvContinueRail(
     onResume: (HistoryEntry) -> Unit,
     onOpenDetails: (HistoryEntry) -> Unit,
     blockDown: Boolean,
+    /**
+     * This row's name in [TvFocusMemory], one per page. Home, the profile page and My List all
+     * draw this rail; sharing a name let one page's row restore the cursor on another's.
+     */
+    focusKey: String,
     onFocusUp: (() -> Boolean)? = null,
     /** Null where the host page heads the rail itself, as My List does with its Expand control. */
     title: String? = "Continue watching",
     /** Empty off Home: My List and the account sheet keep drawing the row without the countdown. */
     nextReleases: Map<Int, NextEpisodeRelease> = emptyMap(),
 ) {
+    val railKey = "continue:$focusKey"
     var managedEntry by remember { mutableStateOf<HistoryEntry?>(null) }
     managedEntry?.let { entry ->
         ContinueWatchingActionsDialog(
             entry = entry,
             onDismiss = { managedEntry = null },
-            onOpenDetails = { onOpenDetails(entry) },
+            onOpenDetails = {
+                val index = history.indexOfFirst { it.anilistId == entry.anilistId }.coerceAtLeast(0)
+                TvFocusMemory.arm(railKey, index, entry.anilistId)
+                onOpenDetails(entry)
+            },
         )
     }
 
     val historyIds = history.map(HistoryEntry::anilistId)
-    val railKey = "continue:${title ?: "untitled"}"
-    var lastFocusedIndex by remember(historyIds) { mutableIntStateOf(TvFocusMemory.indexOf(railKey)) }
+    var lastFocusedIndex by remember(historyIds) { mutableIntStateOf(TvFocusMemory.indexOf(railKey, historyIds)) }
     val itemFocusTargets = remember(historyIds) { List(history.size) { TvFocusTarget() } }
     // Each card's info button: Up from a card goes there before it leaves the rail.
     val actionRequesters = remember(historyIds) { List(history.size) { FocusRequester() } }
     var actionsFocused by remember { mutableStateOf(false) }
     val railState = rememberContinueRailState(history.firstOrNull()?.anilistId, rememberTvRailState())
+    val latestHistoryIds by rememberUpdatedState(historyIds)
+    val focusTracker = remember { TvRailFocusTracker() }
+    TvRailFocusRecovery("continue", focusTracker, historyIds, railState, itemFocusTargets)
 
     // The player's Back lands here when playback started from this row, so the cursor goes back to
-    // the card it started from — see TvFocusMemory.
+    // the card it started from — see TvFocusMemory. By title, not position: playback moves the show
+    // just watched to the front, so its old index now holds a different show.
     LaunchedEffect(railKey) {
-        val restore = TvFocusMemory.consumeRestore(railKey) ?: return@LaunchedEffect
-        val index = restore.coerceIn(0, history.lastIndex.coerceAtLeast(0))
+        val index = TvFocusMemory.consumeRestore(railKey, historyIds) ?: return@LaunchedEffect
         railState.scrollToItem(index)
         withFrameNanos { }
         itemFocusTargets.getOrNull(index)
@@ -1144,6 +1258,11 @@ internal fun TvContinueRail(
                         }
                         if (onFocusUp != null) onFocusUp() else false
                     }
+                    // The long-press menu takes focus into its own window; a card it removes is
+                    // still this row's to recover once the menu has gone.
+                    .onFocusChanged {
+                        if (!it.hasFocus) focusTracker.rowLostFocus(latestHistoryIds, keep = managedEntry != null)
+                    }
                     .focusProperties {
                         enter = { direction ->
                             tvRailEnterRequester(direction, itemFocusTargets, lastFocusedIndex)
@@ -1153,13 +1272,20 @@ internal fun TvContinueRail(
                 contentPadding = PaddingValues(horizontal = TvPagePadding, vertical = 10.dp),
                 horizontalArrangement = Arrangement.spacedBy(18.dp),
             ) {
-                itemsIndexed(history, key = { _, item -> item.anilistId }) { index, entry ->
+                itemsIndexed(history, key = { _, item -> item.anilistId }, contentType = { _, _ -> "continue-card" }) { index, entry ->
                     TvContinueCard(
                         entry = entry,
                         nextRelease = nextReleases[entry.anilistId],
-                        onClick = { onResume(entry) },
+                        onClick = {
+                            // Leaving for the player: Back restores this card.
+                            TvFocusMemory.arm(railKey, index, entry.anilistId)
+                            onResume(entry)
+                        },
                         onLongClick = { managedEntry = entry },
-                        onOpenDetails = { onOpenDetails(entry) },
+                        onOpenDetails = {
+                            TvFocusMemory.arm(railKey, index, entry.anilistId)
+                            onOpenDetails(entry)
+                        },
                         onRemove = { LibraryStore.removeHistory(entry.anilistId, dismissRemoteSeed = true) },
                         actionsRequester = actionRequesters[index],
                         cardRequester = itemFocusTargets[index].requester,
@@ -1167,11 +1293,14 @@ internal fun TvContinueRail(
                         onFocused = { focused ->
                             if (focused) {
                                 lastFocusedIndex = index
-                                TvFocusMemory.focused(railKey, index)
+                                TvFocusMemory.focused(railKey, index, entry.anilistId)
                             }
                         },
                         modifier = Modifier
                             .tvFocusTarget(itemFocusTargets[index])
+                            // hasFocus, not isFocused: the corner buttons are inside the card, and
+                            // focus sits on "remove" when the card is removed.
+                            .onFocusChanged { if (it.hasFocus) focusTracker.cardFocused(entry.anilistId, index) }
                             .then(
                                 if (blockDown) {
                                     Modifier.focusProperties { down = FocusRequester.Cancel }

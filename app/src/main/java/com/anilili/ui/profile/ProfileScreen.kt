@@ -850,6 +850,7 @@ fun ProfileScreen(
                                         onResume = onResume,
                                         onOpenDetails = onOpenDetails,
                                         blockDown = false,
+                                        focusKey = "my-list",
                                         title = null,
                                     )
                                 } else {

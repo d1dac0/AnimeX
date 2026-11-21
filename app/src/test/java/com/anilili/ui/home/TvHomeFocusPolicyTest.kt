@@ -4,6 +4,8 @@ package com.anilili.ui.home
 
 import androidx.compose.ui.focus.FocusDirection
 import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.unit.dp
+import com.anilili.ui.components.TvTopNavigationHeight
 import com.anilili.data.model.CoverImage
 import com.anilili.data.model.Media
 import com.anilili.ui.adaptive.TvFocusTarget
@@ -104,5 +106,28 @@ class TvHomeFocusPolicyTest {
             attached.requester,
             tvRailEnterRequester(FocusDirection.Right, listOf(attached), index = 0),
         )
+    }
+
+    @Test
+    fun anEmptySpotlightMeansNoHeroEvenWithARailPreview() {
+        val preview = Media(id = 2)
+
+        assertNull(tvHomeHero(spotlightSlide = null, railPreview = preview))
+        assertNull(tvHomeHero<Media>(spotlightSlide = null, railPreview = null))
+    }
+
+    @Test
+    fun aRailPreviewReplacesTheSpotlightSlide() {
+        val slide = Media(id = 1)
+        val preview = Media(id = 2)
+
+        assertSame(preview, tvHomeHero(slide, preview))
+        assertSame(slide, tvHomeHero(slide, null))
+    }
+
+    @Test
+    fun withNoHeroTheFirstRailSitsBelowTheBar() {
+        assertEquals(TvTopNavigationHeight, tvHomeListTopPadding(hasHero = false))
+        assertEquals(0.dp, tvHomeListTopPadding(hasHero = true))
     }
 }
