@@ -71,6 +71,8 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.saveable.Saver
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
@@ -186,6 +188,39 @@ private enum class TvDetailTab(val label: String) {
     EPISODES("Episodes"),
     RELATED("Related"),
 }
+
+/**
+ * The card the cursor was last on, kept with the page while another destination is on top of it.
+ *
+ * A marker rather than state because it changes on every move along a strip and nothing draws it:
+ * it is only read once, when the page is composed again after Back, to put the cursor where it was
+ * instead of on Watch. See [tvEpisodeFocusMarker] and [tvRelatedFocusMarker] for what it holds.
+ */
+internal class TvFocusMemory(var marker: String? = null) {
+    companion object {
+        val Saver: Saver<TvFocusMemory, String> = Saver(
+            save = { it.marker },
+            restore = { TvFocusMemory(it) },
+        )
+    }
+}
+
+private const val EPISODE_FOCUS_MARKER = "episode:"
+private const val RELATED_FOCUS_MARKER = "related:"
+
+/** The focus marker for an episode card, by its pipe id. */
+internal fun tvEpisodeFocusMarker(pipeId: String): String = EPISODE_FOCUS_MARKER + pipeId
+
+/** The focus marker for a Related card, by its AniList id. */
+internal fun tvRelatedFocusMarker(mediaId: Int): String = RELATED_FOCUS_MARKER + mediaId
+
+/** The episode pipe id [marker] names, or null when it names none. */
+internal fun tvFocusMarkerEpisode(marker: String?): String? =
+    marker?.takeIf { it.startsWith(EPISODE_FOCUS_MARKER) }?.removePrefix(EPISODE_FOCUS_MARKER)?.ifEmpty { null }
+
+/** The Related card's AniList id [marker] names, or null when it names none. */
+internal fun tvFocusMarkerRelated(marker: String?): Int? =
+    marker?.takeIf { it.startsWith(RELATED_FOCUS_MARKER) }?.removePrefix(RELATED_FOCUS_MARKER)?.toIntOrNull()
 
 /**
  * How many repeats of a held Left/Right pass before the strip starts jumping instead of stepping,
@@ -322,7 +357,11 @@ internal fun TvDetailContent(
     // after an airing show opens, and that reset the range the viewer had chosen. Only the season
     // gaining its first rows (an uncounted or switched season finishing its load) re-chooses, so
     // the opening range still follows the resume point; the index is clamped below.
-    var selectedBlockIndex by remember(data.selectedSeasonId, episodes.isEmpty(), episodeOrder) {
+    //
+    // This and the page state under it are saveable: navigation drops plain `remember` while another
+    // page is on top, so Detail → a Related title → Back came back on the Episodes tab, the first
+    // shelf and the opening range, and a typed search was gone.
+    var selectedBlockIndex by rememberSaveable(data.selectedSeasonId, episodes.isEmpty(), episodeOrder) {
         mutableIntStateOf(
             arrivalEpisode
                 ?.let { episode ->
@@ -334,10 +373,17 @@ internal fun TvDetailContent(
     }
     val blockIndex = selectedBlockIndex.coerceIn(0, (blocks.size - 1).coerceAtLeast(0))
     // The season only, for the same reason: an appended row must not wipe what the viewer typed.
-    var query by remember(data.selectedSeasonId) { mutableStateOf("") }
+    var query by rememberSaveable(data.selectedSeasonId) { mutableStateOf("") }
     var searching by remember(data.selectedSeasonId) { mutableStateOf(false) }
-    var tab by remember(data.info.id) { mutableStateOf(TvDetailTab.EPISODES) }
-    var relatedFilter by remember(data.info.id) { mutableStateOf(RelatedFilter.ALL) }
+    var tab by rememberSaveable(data.info.id) { mutableStateOf(TvDetailTab.EPISODES) }
+    var relatedFilter by rememberSaveable(data.info.id) { mutableStateOf(RelatedFilter.ALL) }
+    // What the cursor was last on — an episode card or a Related card — kept across a trip to
+    // another page so Back can put it there again (see [TvFocusMemory]). A plain holder rather than
+    // state: it is written on every move and must not recompose the page for it.
+    val focusMemory = rememberSaveable(data.info.id, saver = TvFocusMemory.Saver) { TvFocusMemory() }
+    // What it held when this page was composed: null on a first visit, the card to return to on Back.
+    val restoreFocus = remember { focusMemory.marker }
+    var restorePending by remember { mutableStateOf(restoreFocus != null) }
     val shownEpisodes = when {
         isMovie -> emptyList()
         query.isNotBlank() -> orderEpisodes(filterEpisodes(episodes, query), episodeOrder)
@@ -354,14 +400,25 @@ internal fun TvDetailContent(
     // Which episode the header is describing. Held by id rather than by value so the description
     // follows enrichment: the row under the cursor is replaced by a copy the moment its title and
     // synopsis land, and a header holding the old instance would go on describing the skeleton.
-    var focusedId by remember(data.selectedSeasonId) { mutableStateOf<String?>(null) }
+    var focusedId by rememberSaveable(data.selectedSeasonId) { mutableStateOf<String?>(null) }
     // Until the strip reports the cursor the arrival asked for, describe the episode it is about
     // to land on rather than the season. Also the moment the Back arrow is allowed into the focus
     // search: the strip, not the primary action, is what holds the cursor on this arrival.
     LaunchedEffect(arrivalEpisode?.pipeId) {
-        arrivalEpisode?.let {
-            focusedId = it.pipeId
+        arrivalEpisode?.let { arrival ->
+            focusedId = arrival.pipeId
             onPrimaryFocusAcquired()
+            // The arrival wins over whatever the page was left on. A page restored from the back
+            // stack reopens on the tab, range and search it was left showing, and the player may
+            // have moved on past that range (or been started from Watch on the Related tab), so
+            // the episode it names is put on show before the strip looks for its card.
+            tab = TvDetailTab.EPISODES
+            if (shownEpisodes.none { it.pipeId == arrival.pipeId }) {
+                query = ""
+                blocks.indexOfFirst { block -> block.episodes.any { it.pipeId == arrival.pipeId } }
+                    .takeIf { it >= 0 }
+                    ?.let { selectedBlockIndex = it }
+            }
         }
     }
     // Deliberately no fallback to the first episode. Until the cursor reaches the strip the page
@@ -412,11 +469,29 @@ internal fun TvDetailContent(
                 "landed=${attempts != null} attempts=${attempts ?: TV_DETAIL_FOCUS_ATTEMPTS}",
         )
     }
+    // A page returned to puts the cursor back on the card it was left on, through the strip's or
+    // the rail's own targets, instead of on Watch. Only for the tab that card lives on, and only
+    // until the first attempt is over; an arrival from the player wins over it.
+    val restoreEpisodePipeId = tvFocusMarkerEpisode(restoreFocus)
+        ?.takeIf { restorePending && arrivalEpisode == null && tab == TvDetailTab.EPISODES && !isMovie }
+    val restoreRelatedId = tvFocusMarkerRelated(restoreFocus)
+        ?.takeIf { restorePending && arrivalEpisode == null && tab == TvDetailTab.RELATED }
+    val onRestoreResult: (Boolean) -> Unit = { landed ->
+        restorePending = false
+        if (!landed) focusScope.launch { focusFirstAction() }
+    }
     // An arrival from the player hands the cursor to the episode strip instead, so this must not
-    // fire alongside it: the two would race and whichever landed last would win. The strip hands
-    // back here if its card never takes the cursor.
+    // fire alongside it: the two would race and whichever landed last would win. The strip and the
+    // rail hand back here if their card never takes the cursor.
     LaunchedEffect(arrivalEpisode != null) {
-        if (arrivalEpisode == null) focusFirstAction()
+        when {
+            arrivalEpisode != null -> restorePending = false
+            restoreEpisodePipeId != null || restoreRelatedId != null -> Unit
+            else -> {
+                restorePending = false
+                focusFirstAction()
+            }
+        }
     }
     // Where Up leaves the episode strip for. Compose's own search out of the range chips finds no
     // candidate above and drops focus entirely — measured on device, the dump holds no focused node
@@ -584,7 +659,11 @@ internal fun TvDetailContent(
                 onDownload = downloads.openBatch.takeIf { downloadScope.isNotEmpty() },
                 primaryActionFocusRequester = primaryActionFocusRequester,
                 saveActionFocusRequester = saveActionFocusRequester,
-                onPrimaryFocusAcquired = onPrimaryFocusAcquired,
+                onPrimaryFocusAcquired = {
+                    // Watch is where a page opens anyway, so a page left from it keeps no marker.
+                    focusMemory.marker = null
+                    onPrimaryFocusAcquired()
+                },
             )
 
             TvDetailTabs(
@@ -631,11 +710,21 @@ internal fun TvDetailContent(
                     },
                     onQueryChange = { query = it },
                     onSearchingChange = { searching = it },
-                    onEpisodeFocused = { focusedId = it.pipeId },
+                    onEpisodeFocused = {
+                        focusedId = it.pipeId
+                        focusMemory.marker = tvEpisodeFocusMarker(it.pipeId)
+                    },
                     onPlay = playEpisode,
                     onToggleWatched = toggleWatched,
                     arrivalFocusPipeId = arrivalEpisode?.pipeId,
-                    onArrivalFocusMissed = { focusScope.launch { focusFirstAction() } },
+                    restoreFocusPipeId = restoreEpisodePipeId,
+                    onInitialFocusResult = { landed ->
+                        if (restoreEpisodePipeId != null) {
+                            onRestoreResult(landed)
+                        } else if (!landed) {
+                            focusScope.launch { focusFirstAction() }
+                        }
+                    },
                     openOnPipeId = startEpisode?.pipeId,
                     upFocusTarget = tabsFocusTarget,
                     seasons = data.seasons,
@@ -655,6 +744,9 @@ internal fun TvDetailContent(
                     // A fresh shelf starts at its head rather than wherever the last one was left.
                     resetKey = activeRelatedFilter,
                     onAnimeClick = onAnimeClick,
+                    onCardFocused = { focusMemory.marker = tvRelatedFocusMarker(it) },
+                    restoreMediaId = restoreRelatedId,
+                    onRestoreResult = onRestoreResult,
                 )
             }
         }
@@ -1470,8 +1562,17 @@ private fun TvEpisodeStrip(
     onToggleWatched: (EpisodeItem) -> Unit,
     /** The episode the player's Back named, to receive the cursor once its card exists. */
     arrivalFocusPipeId: String? = null,
-    /** Told when that card never took the cursor, so the page can place it somewhere else. */
-    onArrivalFocusMissed: () -> Unit = {},
+    /**
+     * The card the cursor was on when the viewer left the page, to receive it again on Back. Only
+     * read when there is no [arrivalFocusPipeId]; unlike an arrival it does not wait for its range
+     * to come on show, because the range it was in is restored with it.
+     */
+    restoreFocusPipeId: String? = null,
+    /**
+     * Told whether the arrival's or the restored card took the cursor, so the page can place it
+     * somewhere else when it did not.
+     */
+    onInitialFocusResult: (Boolean) -> Unit = {},
     /** The episode the strip opens scrolled to, when it is among [episodes]. */
     openOnPipeId: String? = null,
     /** The tab strip's target, for the Up hand-off out of the range chips. */
@@ -1563,7 +1664,8 @@ private fun TvEpisodeStrip(
     // on whichever card happens to sit under the chip above — on a long series that was a card
     // several along from the newest episode the strip had just scrolled to. Held by id rather than
     // by index, because a row appended at the head of a newest-first strip moves every index along.
-    var focusedPipeId by remember(openKey) { mutableStateOf(openOnPipeId) }
+    // Saveable, like the scroll position: Back onto the page re-enters the strip on this card.
+    var focusedPipeId by rememberSaveable(openKey) { mutableStateOf(openOnPipeId) }
     val focusedIndex: () -> Int = {
         currentEpisodes.indexOfFirst { it.pipeId == focusedPipeId }.coerceAtLeast(0)
     }
@@ -1571,7 +1673,9 @@ private fun TvEpisodeStrip(
     // Opens where the viewer left off rather than at episode one, the same as the list it replaced.
     // Once per range on show: re-run on every change to the rows, it scrolled the strip back from
     // wherever the viewer had walked to whenever a row was appended.
-    var openedFor by remember { mutableStateOf<String?>(null) }
+    // Saveable too: the list state is (rememberLazyListState), and a page returned to must not
+    // scroll its restored strip back to the opening card.
+    var openedFor by rememberSaveable { mutableStateOf<String?>(null) }
     LaunchedEffect(openKey, episodes.isEmpty()) {
         if (episodes.isEmpty() || openedFor == openKey) return@LaunchedEffect
         openedFor = openKey
@@ -1594,26 +1698,48 @@ private fun TvEpisodeStrip(
     // focus target.
     // Keyed on the episode asked for, not on the head of the list: in newest-first order an
     // appended row is the new head, and the arrival ran again and pulled the cursor back to it.
-    var arrivalFocusTaken by remember(arrivalFocusPipeId) { mutableStateOf(false) }
-    val arrivalOnShow = arrivalFocusPipeId != null && episodes.any { it.pipeId == arrivalFocusPipeId }
-    LaunchedEffect(arrivalFocusPipeId, arrivalOnShow) {
-        if (!arrivalOnShow || arrivalFocusTaken) return@LaunchedEffect
-        val arrivalIndex = { currentEpisodes.indexOfFirst { it.pipeId == arrivalFocusPipeId } }
-        listState.scrollToItem(arrivalIndex().coerceAtLeast(0) + leadingItems)
+    //
+    // A page returned to (rather than arrived at from the player) puts the cursor back on the card
+    // it was left on the same way. The arrival wins when there is one.
+    val initialFocusPipeId = arrivalFocusPipeId ?: restoreFocusPipeId
+    val isArrival = arrivalFocusPipeId != null
+    var initialFocusTaken by remember(initialFocusPipeId) { mutableStateOf(false) }
+    val initialOnShow = initialFocusPipeId != null && episodes.any { it.pipeId == initialFocusPipeId }
+    LaunchedEffect(initialFocusPipeId, initialOnShow) {
+        if (initialFocusPipeId == null || initialFocusTaken) return@LaunchedEffect
+        if (!initialOnShow) {
+            // An arrival waits for the page to put its range on show. A restored card that is not
+            // on show has nothing to wait for: its range came back with it.
+            if (!isArrival) {
+                initialFocusTaken = true
+                onInitialFocusResult(false)
+            }
+            return@LaunchedEffect
+        }
+        val initialIndex = { currentEpisodes.indexOfFirst { it.pipeId == initialFocusPipeId } }
+        if (isArrival) {
+            listState.scrollToItem(initialIndex().coerceAtLeast(0) + leadingItems)
+        } else {
+            // The strip's scroll was saved with the page; leave it where the viewer had it unless
+            // the card has gone off screen.
+            withFrameNanos { }
+            val shown = listState.layoutInfo.visibleItemsInfo.any { it.key == initialFocusPipeId }
+            if (!shown) listState.scrollToItem(initialIndex().coerceAtLeast(0) + leadingItems)
+        }
         withFrameNanos { }
         // Retried like the page's first focus: on a slow box the card can still be unattached a
         // frame after the scroll, and one attempt that missed left nothing focused.
         val attempts = retryTvFocus(TV_DETAIL_FOCUS_ATTEMPTS) {
-            val card = currentFocusTargets.getOrNull(arrivalIndex())?.takeIf(TvFocusTarget::isAttached)
+            val card = currentFocusTargets.getOrNull(initialIndex())?.takeIf(TvFocusTarget::isAttached)
                 ?: return@retryTvFocus false
             runCatching { card.requester.requestFocus() }.isSuccess && card.holdsFocus
         }
-        arrivalFocusTaken = true
+        initialFocusTaken = true
         DiagnosticsLog.event(
-            "Detail arrival episode focus requested landed=${attempts != null} " +
-                "attempts=${attempts ?: TV_DETAIL_FOCUS_ATTEMPTS}",
+            "Detail ${if (isArrival) "arrival" else "restored"} episode focus requested " +
+                "landed=${attempts != null} attempts=${attempts ?: TV_DETAIL_FOCUS_ATTEMPTS}",
         )
-        if (attempts == null) onArrivalFocusMissed()
+        onInitialFocusResult(attempts != null)
     }
 
     val stepBy: (Int) -> Boolean = step@{ delta ->
@@ -1816,8 +1942,40 @@ private fun TvRelatedCompactRail(
     labelShelves: Boolean,
     resetKey: Any,
     onAnimeClick: (Int) -> Unit,
+    /** Told the media id of each card the cursor lands on, for the page to remember. */
+    onCardFocused: (Int) -> Unit = {},
+    /** The card the cursor was on when the viewer left the page, to receive it again on Back. */
+    restoreMediaId: Int? = null,
+    /** Told whether that card took the cursor, so the page can place it somewhere else if not. */
+    onRestoreResult: (Boolean) -> Unit = {},
 ) {
-    val listState = remember(resetKey) { LazyListState() }
+    // Saveable, so Back from a title opened here finds the rail where it was left; a new shelf
+    // still starts at its head.
+    val listState = rememberSaveable(resetKey, saver = LazyListState.Saver) { LazyListState() }
+    // One target per card, by media id, so a restore can hand the cursor to the card it names.
+    val cardTargets = remember { mutableMapOf<Int, TvFocusTarget>() }
+    LaunchedEffect(restoreMediaId) {
+        val id = restoreMediaId ?: return@LaunchedEffect
+        val index = related.indexOfFirst { it.media.id == id }
+        if (index < 0) {
+            onRestoreResult(false)
+            return@LaunchedEffect
+        }
+        withFrameNanos { }
+        if (listState.layoutInfo.visibleItemsInfo.none { it.key == id }) {
+            listState.scrollToItem(index)
+            withFrameNanos { }
+        }
+        val attempts = retryTvFocus(TV_DETAIL_FOCUS_ATTEMPTS) {
+            val card = cardTargets[id]?.takeIf(TvFocusTarget::isAttached) ?: return@retryTvFocus false
+            runCatching { card.requester.requestFocus() }.isSuccess && card.holdsFocus
+        }
+        DiagnosticsLog.event(
+            "Detail restored related focus requested landed=${attempts != null} " +
+                "attempts=${attempts ?: TV_DETAIL_FOCUS_ATTEMPTS}",
+        )
+        onRestoreResult(attempts != null)
+    }
     LazyRow(
         state = listState,
         modifier = Modifier.fillMaxWidth().padding(vertical = 10.dp).focusGroup(),
@@ -1838,7 +1996,12 @@ private fun TvRelatedCompactRail(
                         modifier = Modifier.padding(bottom = 6.dp),
                     )
                 }
-                TvRelatedCardBody(card, onClick = { onAnimeClick(media.id) })
+                TvRelatedCardBody(
+                    card,
+                    onClick = { onAnimeClick(media.id) },
+                    onFocused = { onCardFocused(media.id) },
+                    modifier = Modifier.tvFocusTarget(cardTargets.getOrPut(media.id) { TvFocusTarget() }),
+                )
             }
         }
     }
@@ -1850,20 +2013,28 @@ private fun TvRelatedCompactRail(
  * The old card was a 16:9 picture over two captions, and a rail of them read as one title repeated.
  */
 @Composable
-private fun TvRelatedCardBody(card: TvRelatedCard, onClick: () -> Unit) {
+private fun TvRelatedCardBody(
+    card: TvRelatedCard,
+    onClick: () -> Unit,
+    onFocused: () -> Unit = {},
+    modifier: Modifier = Modifier,
+) {
     val media = card.media
     var focused by remember { mutableStateOf(false) }
     val accent = MaterialTheme.colorScheme.primary
     val scale by animateFloatAsState(if (focused) 1.045f else 1f, label = "tv-related-card-scale")
     Box(
-        modifier = Modifier
+        modifier = modifier
             .width(TvRelatedCardWidth)
             .height(TvRelatedCardHeight)
             // Lifted by hand rather than through focusHighlight, which clips inside itself and
             // would shave off the halo; this is how the episode cards beside it do it.
             .zIndex(if (focused) 1f else 0f)
             .scale(scale)
-            .onFocusChanged { focused = it.isFocused }
+            .onFocusChanged {
+                focused = it.isFocused
+                if (it.isFocused) onFocused()
+            }
             .focusHalo(focused, TvCardCornerShape)
             .clip(TvCardCornerShape)
             .clickable(onClickLabel = "Open ${media.title.preferred}", onClick = onClick)
