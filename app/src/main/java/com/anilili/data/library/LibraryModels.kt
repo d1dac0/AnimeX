@@ -99,11 +99,21 @@ fun HistoryEntry.resumeFor(episodeNumber: Double): EpisodeResume? {
  *
  * Progress for an episode already counted as watched is ignored, and a zero position clears whatever
  * was stored, so an episode restarted from the beginning does not keep offering its old clock.
+ *
+ * [followsPlayback] is the exception, and it is earned rather than assumed: it says the player has
+ * been observed genuinely running on this episode — the same two-reports bar the held-back Continue
+ * Watching row waits on. A bare clock never has that evidence, which is why it defaults to false:
+ * a late callback from a torn-down player would otherwise walk the row backwards onto whatever was
+ * playing before. Without the exception the row's episode only moves on resolve, so a session that
+ * never re-resolved onto the newer episode left Continue Watching pointing at the older one no
+ * matter how long the newer one played, and a restart sent the viewer back to it. The clocks stay
+ * per episode either way: the row moves, and the abandoned episode's position does not go with it.
  */
 internal fun HistoryEntry.withEpisodeProgress(
     episodeNumber: Double,
     positionMs: Long,
     durationMs: Long,
+    followsPlayback: Boolean = false,
 ): HistoryEntry {
     if (episodeNumber in watchedEpisodes) return this
     val key = episodeKey(episodeNumber)
@@ -112,10 +122,20 @@ internal fun HistoryEntry.withEpisodeProgress(
     } else {
         capResumePoints(resumePoints + (key to EpisodeResume(positionMs, durationMs)))
     }
-    return if (episodeNumber == this.episodeNumber) {
-        copy(positionMs = positionMs, durationMs = durationMs, resumePoints = points)
-    } else {
-        copy(resumePoints = points)
+    return when {
+        episodeNumber == this.episodeNumber ->
+            copy(positionMs = positionMs, durationMs = durationMs, resumePoints = points)
+        // The stored title belongs to the episode being left behind, and nothing here knows the new
+        // one's name; the next resolve fills it in, the same way the remote advance leaves it.
+        followsPlayback ->
+            copy(
+                episodeNumber = episodeNumber,
+                episodeTitle = null,
+                positionMs = positionMs,
+                durationMs = durationMs,
+                resumePoints = points,
+            )
+        else -> copy(resumePoints = points)
     }
 }
 

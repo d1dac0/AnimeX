@@ -168,10 +168,19 @@ object LibraryStore {
      * or the row advanced past the watched threshold. [HistoryEntry.withEpisodeProgress] keeps the
      * clock per episode and still refuses a late callback for one already counted as watched, which
      * is what the old episode check was really guarding against.
+     *
+     * [followsPlayback] moves the row itself onto [episodeNumber] once playback has confirmed it is
+     * the one actually running — see [HistoryEntry.withEpisodeProgress] for what earns it.
      */
-    fun updateProgress(anilistId: Int, episodeNumber: Double, positionMs: Long, durationMs: Long) {
+    fun updateProgress(
+        anilistId: Int,
+        episodeNumber: Double,
+        positionMs: Long,
+        durationMs: Long,
+        followsPlayback: Boolean = false,
+    ) {
         val existing = _history.value.firstOrNull { it.anilistId == anilistId } ?: return
-        val updated = existing.withEpisodeProgress(episodeNumber, positionMs, durationMs)
+        val updated = existing.withEpisodeProgress(episodeNumber, positionMs, durationMs, followsPlayback)
         if (updated == existing) return
         upsertHistory(updated)
     }
