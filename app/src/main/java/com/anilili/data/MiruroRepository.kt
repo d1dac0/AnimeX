@@ -1335,6 +1335,14 @@ class MiruroRepository(
     suspend fun notifications(markAllRead: Boolean = false) = aniList.notifications(markAllRead)
     suspend fun favouriteAnime() = aniList.favouriteAnime()
     suspend fun userAnimeList(userId: Int) = aniList.userAnimeList(userId)
+
+    /**
+     * Just the ids the account is actively watching or rewatching (#76). The release sync only
+     * ever needed the ids, and pulling the full [userAnimeList] collection for them decoded a
+     * multi-MB object graph beside a playing player's buffer; this asks AniList to filter and
+     * ships an id-level response instead.
+     */
+    suspend fun trackedAiringMediaIds(userId: Int): Set<Int> = aniList.trackedAiringMediaIds(userId)
     suspend fun aniListActivityHistory(userId: Int) = aniList.activityHistory(userId)
     suspend fun saveAniListProgress(mediaId: Int, progress: Int, totalEpisodes: Int?) =
         aniList.syncMediaListProgress(mediaId, progress, totalEpisodes)

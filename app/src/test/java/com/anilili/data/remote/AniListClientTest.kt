@@ -19,6 +19,9 @@ import org.junit.Test
 
 private const val DAY_SEC = 86_400L
 
+/** A token without an `exp` claim never reads as expired, so it signs every test request. */
+private const val TEST_TOKEN = "test-token"
+
 class AniListClientTest {
     private lateinit var server: MockWebServer
     private lateinit var client: AniListClient
@@ -30,6 +33,8 @@ class AniListClientTest {
             client = OkHttpClient(),
             json = Json { ignoreUnknownKeys = true },
             endpoint = server.url("/graphql").toString(),
+            // Signed requests for the authenticated queries, without AuthManager's Android context.
+            tokenProvider = { TEST_TOKEN },
         )
     }
 
@@ -185,6 +190,68 @@ class AniListClientTest {
 
         assertEquals(AiringDayCount(total = 0, nonAdult = 0, truncated = false), counts[0])
         assertNull(counts[1])
+    }
+
+    @Test
+    fun `tracked airing ids ask AniList for exactly CURRENT and REPEATING with id level media`() = runBlocking {
+        server.enqueue(graphQlBody("""{"data":{"MediaListCollection":{"lists":[]}}}"""))
+
+        val ids = client.trackedAiringMediaIds(42)
+
+        assertTrue(ids.isEmpty())
+        val request = server.takeRequest()
+        assertEquals("Bearer $TEST_TOKEN", request.getHeader("Authorization"))
+        val body = request.body.readUtf8()
+        assertTrue(body.contains("status_in: [CURRENT, REPEATING]"))
+        // AniList does the status filtering, so no other status can be in the query...
+        assertTrue(!body.contains("PLANNING"))
+        assertTrue(!body.contains("PAUSED"))
+        assertTrue(!body.contains("COMPLETED"))
+        assertTrue(!body.contains("DROPPED"))
+        // ...and the release sync only reads ids (#76): the full field set on every entry is what
+        // made the old sync response multi-MB beside the player.
+        assertTrue(body.contains("media { id }"))
+        assertTrue(!body.contains("coverImage"))
+        assertTrue(!body.contains("title {"))
+        assertTrue(!body.contains("nextAiringEpisode"))
+    }
+
+    @Test
+    fun `tracked airing ids keep only entries that say CURRENT or REPEATING themselves`() = runBlocking {
+        // Whatever list an entry rides in — a status group or a custom list — the id counts only
+        // when the entry's own status says so, the same filter the release sync applied to the
+        // full collection before the ids-only query (#76).
+        server.enqueue(
+            graphQlBody(
+                """{"data":{"MediaListCollection":{"lists":[
+                    {"status":"CURRENT","isCustomList":false,"entries":[
+                        {"status":"CURRENT","media":{"id":7}},
+                        {"status":null,"media":{"id":8}}]},
+                    {"status":null,"isCustomList":true,"entries":[
+                        {"status":null,"media":{"id":8}},
+                        {"status":"CURRENT","media":{"id":7}}]},
+                    {"status":"PLANNING","isCustomList":false,"entries":[
+                        {"status":"PLANNING","media":{"id":9}}]}]}}}""",
+            ),
+        )
+
+        val ids = client.trackedAiringMediaIds(42)
+
+        assertEquals(setOf(7), ids)
+    }
+
+    @Test
+    fun `a tracked entry with no media is skipped rather than failing the whole answer`() = runBlocking {
+        server.enqueue(
+            graphQlBody(
+                """{"data":{"MediaListCollection":{"lists":[
+                    {"status":"CURRENT","isCustomList":false,"entries":[
+                        {"status":"CURRENT"},
+                        {"status":"CURRENT","media":{"id":11}}]}]}}}""",
+            ),
+        )
+
+        assertEquals(setOf(11), client.trackedAiringMediaIds(42))
     }
 
     private fun dayWindows(days: Int): List<LongRange> =
