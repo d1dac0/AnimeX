@@ -4,6 +4,7 @@ package com.anilili.ui.detail
 
 import com.anilili.ui.adaptive.FocusFillRest
 import android.view.inputmethod.EditorInfo
+import androidx.activity.compose.BackHandler
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
@@ -1666,6 +1667,13 @@ private fun TvEpisodeStrip(
     val finishSearching = {
         returnToFind = true
         onSearchingChange(false)
+    }
+    // Back while the Find field is up closes Find, as Done does, and the cursor goes back to the
+    // Find chip. The field's own Back hook only closes the keyboard; with the keyboard already
+    // gone, Back reached navigation and left the whole page.
+    BackHandler(enabled = searching) {
+        onQueryChange("")
+        finishSearching()
     }
     val showSeasons = seasons.size > 1
     // What the rows here hand Up to: the season on show when the tab row carries seasons, the tab
