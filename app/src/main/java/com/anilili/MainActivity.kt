@@ -185,6 +185,7 @@ import com.anilili.ui.adaptive.rememberAppDeviceProfile
 import com.anilili.ui.adaptive.rememberFocusFill
 import com.anilili.ui.adaptive.rememberTvFocusTarget
 import com.anilili.ui.adaptive.rememberTvRefreshRequest
+import com.anilili.ui.adaptive.shouldUseLowCostTvEffects
 import com.anilili.ui.adaptive.tvFocusHandoff
 import com.anilili.ui.announce.AnnouncementHost
 import com.anilili.ui.components.DefaultNavEnter
@@ -290,6 +291,30 @@ class MainActivity : FragmentActivity() {
             com.anilili.ui.profiles.ProfilesUi.showPicker(atLaunch = true)
         }
         DiagnosticsLog.event("MainActivity pendingRoute=${pendingRoute ?: "none"}")
+        // Taken now, before the root consumes the route or link: a launch aimed at an episode (the
+        // launcher's Watch Next card, an anilili://watch link) starts its player underneath the
+        // intro straight away, and the intro's own ExoPlayer would then compete with it for the
+        // decoder on a single-decoder stick, both soundtracks playing. Low-memory boxes get the
+        // mark for the same reason the rest of the app takes its low-cost path on them.
+        val launchHasDestination = pendingRoute != null || pendingLink != null
+        val launchActivityManager = getSystemService(ACTIVITY_SERVICE) as? android.app.ActivityManager
+        val launchLowCostTv = shouldUseLowCostTvEffects(
+            isTv = BuildConfig.FLAVOR == "tv",
+            isLowRamDevice = launchActivityManager?.isLowRamDevice == true,
+            memoryClassMb = launchActivityManager?.memoryClass,
+        )
+        val videoIntroAllowed = videoLaunchIntroAllowed(
+            tvFlavor = BuildConfig.FLAVOR == "tv",
+            profileSwitchLaunch = profileSwitchLaunch,
+            launchHasDestination = launchHasDestination,
+            lowCostTv = launchLowCostTv,
+        )
+        if (BuildConfig.FLAVOR == "tv" && !videoIntroAllowed) {
+            DiagnosticsLog.event(
+                "Video intro skipped profileSwitch=$profileSwitchLaunch " +
+                    "destination=$launchHasDestination lowCostTv=$launchLowCostTv",
+            )
+        }
         openAnnouncement(intent)
         applyBenchmarkPin(intent)
         handleAuthRedirect(intent)
@@ -353,10 +378,9 @@ class MainActivity : FragmentActivity() {
                             // The TV flavor's video intro can be turned off in Settings. Settings load
                             // asynchronously, so the choice waits for them rather than starting one
                             // intro and swapping to the other; the mobile flavor has only the mark.
+                            // See videoLaunchIntroAllowed for the launches that never get the video.
                             val videoIntro by produceState<Boolean?>(
-                                // A profile switch restarts the app; the viewer has just seen the
-                                // intro and is waiting on their profile, not on a second one.
-                                initialValue = if (BuildConfig.FLAVOR == "tv" && !profileSwitchLaunch) null else false,
+                                initialValue = if (videoIntroAllowed) null else false,
                             ) {
                                 if (value == null) {
                                     value = withTimeoutOrNull(LaunchIntroSettingsWaitMillis) {
@@ -1198,6 +1222,20 @@ private fun BoxScope.PipeHumanCheckBackdrop(isTv: Boolean, onDismiss: () -> Unit
  * past this the water-fill mark plays rather than keeping the screen blank.
  */
 private const val LaunchIntroSettingsWaitMillis = 1_000L
+
+/**
+ * Whether this launch may play the video intro at all; when it may, the Settings switch still
+ * decides. Only the TV flavour has one. A profile switch restarts the app, and the viewer has just
+ * seen the intro. A launch aimed at a route or link (Watch Next, an `anilili://` link) navigates
+ * underneath the intro at once, and its player would share the decoder with the intro's. A
+ * low-cost television ([shouldUseLowCostTvEffects]) gets the mark rather than a second ExoPlayer.
+ */
+internal fun videoLaunchIntroAllowed(
+    tvFlavor: Boolean,
+    profileSwitchLaunch: Boolean,
+    launchHasDestination: Boolean,
+    lowCostTv: Boolean,
+): Boolean = tvFlavor && !profileSwitchLaunch && !launchHasDestination && !lowCostTv
 
 private const val TV_FOCUS_ATTEMPTS = 10
 
