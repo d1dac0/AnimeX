@@ -384,18 +384,26 @@ internal fun TvDetailContent(
     // What it held when this page was composed: null on a first visit, the card to return to on Back.
     val restoreFocus = remember { focusMemory.marker }
     var restorePending by remember { mutableStateOf(restoreFocus != null) }
-    val shownEpisodes = when {
-        isMovie -> emptyList()
-        query.isNotBlank() -> orderEpisodes(filterEpisodes(episodes, query), episodeOrder)
-        else -> blocks.getOrNull(blockIndex)?.episodes.orEmpty()
+    // Remembered, as is everything below that is derived from the rows: the page used to recompose
+    // on every step along the strip, and each pass re-filtered the season and handed the rows new
+    // lists. It no longer recomposes for a step (only the header and backdrop read the cursor),
+    // but a list kept to its inputs is still what lets the strip and the tab row skip.
+    val shownEpisodes = remember(isMovie, query, episodes, episodeOrder, blocks, blockIndex) {
+        when {
+            isMovie -> emptyList()
+            query.isNotBlank() -> orderEpisodes(filterEpisodes(episodes, query), episodeOrder)
+            else -> blocks.getOrNull(blockIndex)?.episodes.orEmpty()
+        }
     }
+    val blockLabels = remember(blocks) { blocks.map { it.label } }
+    val newestEpisodeNumber = remember(episodes) { episodes.maxOfOrNull(EpisodeItem::number) }
     // The next episode in the schedule, as a card of its own when no row stands for it yet — the
     // usual case, because the list is counted from AniList's schedule and stops at the last aired
     // episode. It takes the slot the episode will fill, after the newest one, and is only drawn
     // with the rows it follows: not beside another range, and not in the middle of a search.
     val upcomingEpisode = remember(season, episodes) { tvUpcomingEpisode(season, episodes) }
         ?.takeIf { !isMovie && query.isBlank() }
-        ?.takeIf { episodes.isEmpty() || shownEpisodes.any { it.number == episodes.maxOf(EpisodeItem::number) } }
+        ?.takeIf { episodes.isEmpty() || shownEpisodes.any { it.number == newestEpisodeNumber } }
 
     // Which episode the header is describing. Held by id rather than by value so the description
     // follows enrichment: the row under the cursor is replaced by a copy the moment its title and
@@ -425,8 +433,14 @@ internal fun TvDetailContent(
     // is describing the season — its score, whether it is still airing, what it is — which is what
     // a viewer arriving from Home wants to read. Guessing at episode one instead would answer a
     // question nobody had asked yet and hide the one they had.
-    val described = focusedId?.let { id ->
-        episodes.firstOrNull { it.pipeId == id } ?: upcomingEpisode?.takeIf { it.pipeId == id }
+    //
+    // A lambda rather than a value: [focusedId] changes on every step along the strip, and read
+    // here it recomposed the whole page — the tabs, the strip, every derived list — per press. Read
+    // inside the header and the backdrop, only those two recompose for it.
+    val described: () -> EpisodeItem? = {
+        focusedId?.let { id ->
+            episodes.firstOrNull { it.pipeId == id } ?: upcomingEpisode?.takeIf { it.pipeId == id }
+        }
     }
 
     val blurEpisodeImages by SettingsStore.blurEpisodeImages.collectAsState()
@@ -441,7 +455,7 @@ internal fun TvDetailContent(
     // was blanking the backdrop along with them: Aware! Meisaku-kun (2026), twelve episodes and no
     // stills anywhere, opened on a black page while its unreleased sequel, with no episodes to
     // trip the rule, showed its cover. One backdrop cannot look repeated.
-    val backdrop = described?.image?.takeIf { !blurEpisodeImages } ?: seasonArtwork
+    val backdrop: () -> Any? = { described()?.image?.takeIf { !blurEpisodeImages } ?: seasonArtwork }
 
     val saveActionFocusRequester = remember { FocusRequester() }
     val canWatch = episodes.isNotEmpty() || seasonResume != null
@@ -537,7 +551,9 @@ internal fun TvDetailContent(
     // A movie has no strip to scope a batch by, so its one entry is the whole of it.
     // Turned back into running order, so a batch still queues episode 1 before episode 2 whichever
     // way round the strip is drawn.
-    val downloadScope = if (isMovie) episodes else orderEpisodes(shownEpisodes, episodeOrder)
+    val downloadScope = remember(isMovie, episodes, shownEpisodes, episodeOrder) {
+        if (isMovie) episodes else orderEpisodes(shownEpisodes, episodeOrder)
+    }
     val downloads = rememberSeasonDownloads(
         data = data,
         seasonMedia = season,
@@ -557,20 +573,26 @@ internal fun TvDetailContent(
     // chip per shelf. The season on show is not among them:
     // its own chip already selects it, and a card that opened a second page for what the header is
     // describing was only ever a way to lose the one you were on.
-    val franchise = data.watchOrder.filter { it.media.id != season.id }
-    val franchiseIds = franchise.mapTo(HashSet()) { it.media.id }
-    val suggestions = data.suggestions.filter { it.id != season.id && it.id !in franchiseIds }
-    val relatedFilters = RelatedFilter.entries.filter { filter ->
-        when (filter) {
-            RelatedFilter.ALL -> true
-            RelatedFilter.SUGGESTIONS -> suggestions.isNotEmpty()
-            else -> franchise.any { it.group == filter.group }
+    val watchOrder = data.watchOrder
+    val franchise = remember(watchOrder, season.id) { watchOrder.filter { it.media.id != season.id } }
+    val allSuggestions = data.suggestions
+    val suggestions = remember(allSuggestions, franchise, season.id) {
+        val franchiseIds = franchise.mapTo(HashSet()) { it.media.id }
+        allSuggestions.filter { it.id != season.id && it.id !in franchiseIds }
+    }
+    val relatedFilters = remember(franchise, suggestions) {
+        RelatedFilter.entries.filter { filter ->
+            when (filter) {
+                RelatedFilter.ALL -> true
+                RelatedFilter.SUGGESTIONS -> suggestions.isNotEmpty()
+                else -> franchise.any { it.group == filter.group }
+            }
         }
     }
     // A chip can lose its shelf between loads (the series walk replaces the seeded chain), and a
     // filter pinned to an empty shelf would show an empty rail.
     val activeRelatedFilter = if (relatedFilter in relatedFilters) relatedFilter else RelatedFilter.ALL
-    val relatedCards = buildList {
+    val relatedCards = remember(franchise, suggestions, activeRelatedFilter) { buildList {
         if (activeRelatedFilter != RelatedFilter.SUGGESTIONS) {
             franchise
                 .filter { activeRelatedFilter == RelatedFilter.ALL || it.group == activeRelatedFilter.group }
@@ -590,7 +612,7 @@ internal fun TvDetailContent(
                 )
             }
         }
-    }.distinctBy { it.media.id }
+    }.distinctBy { it.media.id } }
 
     val canvas = MaterialTheme.colorScheme.background
     Box(
@@ -599,12 +621,7 @@ internal fun TvDetailContent(
             .onFocusChanged { pageFocused.value = it.hasFocus }
             .background(canvas),
     ) {
-        AsyncImage(
-            model = backdrop,
-            contentDescription = null,
-            modifier = Modifier.fillMaxSize(),
-            contentScale = ContentScale.Crop,
-        )
+        TvDetailBackdrop(backdrop)
         // Two gradients rather than one: the horizontal keeps the header legible over whatever the
         // still happens to be, and the vertical darkens the lower half a little so the strip's
         // cards stand off the picture. Only a little: the strip ends well above the bottom edge, and
@@ -644,7 +661,7 @@ internal fun TvDetailContent(
                 modifier = Modifier.weight(1f, fill = false),
                 season = season,
                 logo = data.logo,
-                episode = described.takeUnless { isMovie },
+                episode = { if (isMovie) null else described() },
                 isMovie = isMovie,
                 resume = seasonResume,
                 saved = saved,
@@ -697,7 +714,7 @@ internal fun TvDetailContent(
                     episodes = shownEpisodes,
                     allEpisodeCount = episodes.size,
                     season = season,
-                    blocks = blocks.map { it.label },
+                    blocks = blockLabels,
                     selectedBlockIndex = blockIndex,
                     query = query,
                     searching = searching,
@@ -754,6 +771,20 @@ internal fun TvDetailContent(
 }
 
 /**
+ * The page's backdrop. Its own composable so that the cursor's episode, which [model] reads, only
+ * recomposes the picture rather than the page around it.
+ */
+@Composable
+private fun TvDetailBackdrop(model: () -> Any?) {
+    AsyncImage(
+        model = model(),
+        contentDescription = null,
+        modifier = Modifier.fillMaxSize(),
+        contentScale = ContentScale.Crop,
+    )
+}
+
+/**
  * The top half: the series' own typography, then whichever episode the cursor is on, then the
  * actions.
  *
@@ -767,7 +798,11 @@ private fun TvDetailHeader(
     modifier: Modifier = Modifier,
     season: Media,
     logo: String?,
-    episode: EpisodeItem?,
+    /**
+     * The episode the cursor is on, or null for the season. Read where it is drawn rather than
+     * passed by value, so a step along the strip recomposes only this summary.
+     */
+    episode: () -> EpisodeItem?,
     isMovie: Boolean,
     resume: HistoryEntry?,
     saved: Boolean,
@@ -867,10 +902,11 @@ private fun TvDetailHeader(
 
             // One slot either way, so the measure policy below can count on three.
             Box {
-                if (episode != null) {
+                val focusedEpisode = episode()
+                if (focusedEpisode != null) {
                     TvFocusedEpisodeSummary(
-                        episode = episode,
-                        unaired = episodeIsUnaired(episode, season),
+                        episode = focusedEpisode,
+                        unaired = episodeIsUnaired(focusedEpisode, season),
                         modifier = Modifier.padding(top = 10.dp),
                     )
                 } else {

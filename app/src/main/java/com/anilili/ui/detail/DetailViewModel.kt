@@ -86,13 +86,20 @@ data class DetailData(
      */
     val pageLogo: String? = null,
 ) {
+    // The derived lists below are computed once per instance, on first read, and held. They were
+    // getters, and the television page reads them on every recomposition — once per D-pad step
+    // along the episode strip — rebuilding the season chain, its labels (through the bundled
+    // cross-reference's lock) and the watch order each time, and handing the rows below a new list
+    // every time so none of them could skip. A DetailData is immutable apart from these caches, and
+    // `copy` makes a new instance with empty ones, so a value never outlives its inputs. Body
+    // properties, so equality and `copy` are exactly what they were.
+
     /**
      * Episodic entries of the prequel/sequel chain, in airing order — one detail page serves the
      * whole series and the Episodes tab filters between its seasons. Movies and specials stay on
      * the Related tab.
      */
-    val seasons: List<Media>
-        get() = seasonChain(info, series)
+    val seasons: List<Media> by lazy { seasonChain(info, series) }
 
     /**
      * The season the page is describing. The season chips swap it, so everything season-scoped —
@@ -103,22 +110,34 @@ data class DetailData(
         get() = seasons.firstOrNull { it.id == selectedSeasonId } ?: info
 
     /** What each of [seasons] is called in a picker, by id; see [seasonLabels]. */
-    val seasonLabels: Map<Int, String>
-        get() = seasonLabels(seasons, ::bundledTvdbRef)
+    val seasonLabels: Map<Int, String> by lazy { seasonLabels(seasons, ::bundledTvdbRef) }
+
+    /** [watchOrder] with the adult setting it was built under; rebuilt when that setting changes. */
+    @Volatile private var watchOrderMemo: Pair<Boolean, List<WatchOrderEntry>>? = null
+
+    /** [suggestions] with the [watchOrder] instance it was filtered against. */
+    @Volatile private var suggestionsMemo: Pair<List<WatchOrderEntry>, List<Media>>? = null
 
     /**
      * The franchise as a running order — seasons, films, OVAs and specials — for the Related tab.
      *
      * Derived rather than fetched: everything it needs is already on the records the page holds.
      * See [buildWatchOrder] for why the series walk alone cannot answer this.
+     *
+     * Held per value of the adult-content setting rather than once, because the getter it replaced
+     * read that setting on every call and a page held across a change to it must follow it.
      */
     val watchOrder: List<WatchOrderEntry>
-        get() = buildWatchOrder(
-            info = info,
-            series = series,
-            seasons = seasons,
-            hideAdult = SettingsStore.hideAdultContent.value,
-        )
+        get() {
+            val hideAdult = SettingsStore.hideAdultContent.value
+            watchOrderMemo?.let { (builtFor, order) -> if (builtFor == hideAdult) return order }
+            return buildWatchOrder(
+                info = info,
+                series = series,
+                seasons = seasons,
+                hideAdult = hideAdult,
+            ).also { watchOrderMemo = hideAdult to it }
+        }
 
     /**
      * Recommendations worth listing separately — a season of this very series is already on the
@@ -126,8 +145,11 @@ data class DetailData(
      */
     val suggestions: List<Media>
         get() {
-            val franchise = watchOrder.mapTo(mutableSetOf()) { it.media.id }
+            val order = watchOrder
+            suggestionsMemo?.let { (builtFrom, picks) -> if (builtFrom === order) return picks }
+            val franchise = order.mapTo(mutableSetOf()) { it.media.id }
             return recommendations.filter { it.id != info.id && it.id !in franchise }
+                .also { suggestionsMemo = order to it }
         }
 }
 
