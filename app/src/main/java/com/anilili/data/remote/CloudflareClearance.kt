@@ -70,26 +70,23 @@ internal object CloudflareClearanceStore {
     /**
      * Warms the store off the main thread.
      *
-     * Both halves touch disk: `getSharedPreferences` stats and creates the prefs directory, and
-     * `getDefaultUserAgent` loads the WebView provider. Doing either in `Application.onCreate`
-     * tripped StrictMode's DiskReadViolation on a Galaxy S25, and the WebView load in particular is
-     * slow enough on a cold TV to be worth keeping off both the startup path and the challenge path.
+     * `getSharedPreferences` stats and creates the prefs directory, which in `Application.onCreate`
+     * tripped StrictMode's DiskReadViolation on a Galaxy S25.
+     *
+     * The WebView's default User-Agent is deliberately not looked up here. `getDefaultUserAgent`
+     * loads the WebView provider — on current builds the whole Chromium renderer (see
+     * EpisodeDownloads) — and doing it on every process start, WorkManager's included, paid for a
+     * browser nobody had asked for, ahead of the first-content gate MainActivity keeps for its
+     * resolver WebViews (#83). Only [harvest] needs the agent, and it runs inside the challenge
+     * WebView, where the provider is loaded anyway.
      */
     fun init(context: Context, scope: CoroutineScope) {
         val app = context.applicationContext
         appContext = app
         scope.launch(Dispatchers.IO) {
             prefs = app.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            defaultUserAgent = runCatching { WebSettings.getDefaultUserAgent(app) }
-                .onFailure {
-                    DiagnosticsLog.throwable("Cloudflare default user agent unavailable", it)
-                }
-                .getOrNull()
         }
     }
-
-    /** The User-Agent the challenge WebView will present, and therefore the one to replay with. */
-    fun browserUserAgent(): String? = defaultUserAgent
 
     fun clearance(host: String): CloudflareClearance? {
         val key = host.lowercase()
@@ -167,11 +164,16 @@ internal object CloudflareClearanceStore {
             )
             return null
         }
-        // Called from the challenge WebView, so the provider is loaded and this is cheap; the
-        // fallback only matters if a challenge somehow beats [init] off the disk.
+        // Called from the challenge WebView, so the provider is loaded and this is cheap. Looked up
+        // on the first harvest of the process and kept for the rest of it; [init] no longer
+        // fetches it ahead of time.
         val agent = defaultUserAgent
             ?: appContext?.let { ctx ->
-                runCatching { WebSettings.getDefaultUserAgent(ctx) }.getOrNull()
+                runCatching { WebSettings.getDefaultUserAgent(ctx) }
+                    .onFailure {
+                        DiagnosticsLog.throwable("Cloudflare default user agent unavailable", it)
+                    }
+                    .getOrNull()
             }?.also { defaultUserAgent = it }
             ?: return null
         return CloudflareClearance(cookies, agent, System.currentTimeMillis())
