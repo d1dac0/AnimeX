@@ -69,6 +69,17 @@ object LibraryStore {
     private var remoteRefreshJob: Job? = null
     @Volatile private var lastRemoteRefreshAt = 0L
 
+    /**
+     * Whether unforced refreshes are parked while playback holds the screen (#78).
+     *
+     * MainActivity.onStart skips the refresh while a player is on screen and parks it here, so
+     * the one *other* unforced caller — Home's refresh on composition — is absorbed too: a
+     * deep-link Watch start composes Home beneath the transition, and without this its effect
+     * would run the very uncached fetch the park existed to avoid. [takeParkedRemoteRefresh]
+     * clears the park and runs the refresh at the next tab-route entry.
+     */
+    @Volatile private var remoteRefreshParked = false
+
     private val _history = MutableStateFlow<List<HistoryEntry>>(emptyList())
     val history = _history.asStateFlow()
 
@@ -814,6 +825,25 @@ object LibraryStore {
         )
     }
 
+    /**
+     * Parks unforced refreshes until playback has let go of the screen (#78). See
+     * [remoteRefreshParked] for why the park lives in the store rather than at the one caller
+     * that set it.
+     */
+    fun parkUnforcedRemoteRefresh() {
+        remoteRefreshParked = true
+    }
+
+    /**
+     * Takes a refresh parked by [parkUnforcedRemoteRefresh]: clears the park and runs the refresh
+     * now. A no-op when nothing is parked, so a caller may offer it at every qualifying moment.
+     */
+    fun takeParkedRemoteRefresh() {
+        if (!remoteRefreshParked) return
+        remoteRefreshParked = false
+        refreshRemoteLibrary()
+    }
+
     /** Refresh on cold start/foreground, while bounding AniList's shared API rate limit. */
     @Synchronized
     fun refreshRemoteLibrary(force: Boolean = false) {
@@ -822,9 +852,16 @@ object LibraryStore {
             if (_remoteStatuses.value.isNotEmpty()) clearRemoteLibrary()
             return
         }
+        if (!force && remoteRefreshParked) {
+            DiagnosticsLog.event("Library refresh parked while playback holds the screen (#78)")
+            return
+        }
         val now = System.currentTimeMillis()
         if (remoteRefreshJob?.isActive == true) return
         if (!force && now - lastRemoteRefreshAt < REMOTE_REFRESH_INTERVAL_MS) return
+        // A refresh has actually run, so the park is over whatever set it — a forced save-side
+        // refresh during playback ends the park just as surely as a taken one.
+        remoteRefreshParked = false
         lastRemoteRefreshAt = now
         remoteRefreshJob = scope.launch {
             runCatching {
