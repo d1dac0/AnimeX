@@ -13,6 +13,7 @@ import android.graphics.Color
 import android.graphics.drawable.ColorDrawable
 import android.os.Build
 import android.os.Bundle
+import android.os.SystemClock
 import android.util.Rational
 import android.view.KeyEvent
 import android.view.View
@@ -133,6 +134,7 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
+import com.anilili.data.AppGraph
 import com.anilili.data.ProviderBenchmark
 import com.anilili.data.announce.AnnouncementManager
 import com.anilili.data.auth.AuthManager
@@ -237,6 +239,21 @@ import kotlinx.coroutines.withTimeoutOrNull
 import com.anilili.data.settings.GlassSection
 import com.anilili.ui.components.glassEnabled
 
+/**
+ * The route the navigation last reported, as [MainActivity.onStart] needs it to judge the library
+ * refresh without a back-stack reference (#78). Written by MiruroRoot's route effect; read only on
+ * the main thread. A fresh activity clears it in [MainActivity.onCreate].
+ */
+private var lastComposedRoute: String? = null
+
+/**
+ * Whether a player route has been current in this process (#78). The parked refresh is taken at a
+ * tab-route entry only once the viewer has actually been in a player — without this, the pass
+ * through Home that a deep-link start makes on its way to the player would take the refresh the
+ * park existed to avoid.
+ */
+private var hasSeenPlayerRoute = false
+
 class MainActivity : FragmentActivity() {
     private var inPictureInPicture by mutableStateOf(false)
     private var pendingRoute by mutableStateOf<String?>(null)
@@ -244,6 +261,10 @@ class MainActivity : FragmentActivity() {
     private var pictureInPictureReady = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        // Written by MiruroRoot's route effect below; a fresh activity must not inherit the last
+        // one's answer, or onStart would judge the refresh against a screen this activity never
+        // showed (#78).
+        lastComposedRoute = null
         DiagnosticsLog.event("MainActivity.onCreate start savedState=${savedInstanceState != null}")
         window.setBackgroundDrawable(ColorDrawable(Color.BLACK))
         window.decorView.setBackgroundColor(Color.BLACK)
@@ -343,14 +364,42 @@ class MainActivity : FragmentActivity() {
                             if (launchSplashGone) com.anilili.ui.profiles.ProfilesUi.markLaunchIntroDone()
                         }
                         Box(Modifier.fillMaxSize()) {
-                            MiruroRoot(
-                                inPictureInPicture = inPictureInPicture,
-                                onPictureInPictureReadyChanged = ::setPictureInPictureReady,
-                                pendingRoute = pendingRoute,
-                                onRouteConsumed = { pendingRoute = null },
-                                pendingLink = pendingLink,
-                                onLinkConsumed = { pendingLink = null },
-                            )
+                            // The root reads settings flows — interface size, overscan, the theme —
+                            // that only fill in once the asynchronous DataStore read lands, so
+                            // composing it against the defaults built and measured Home twice under
+                            // the splash (#90). The splash is up regardless, so the wait hides
+                            // there; the 1 s cap mirrors LaunchIntroSettingsWaitMillis, and the cap
+                            // always opens the gate in the end — a slow read costs a default-shaped
+                            // first frame, never a stuck splash.
+                            var rootSettingsReady by remember { mutableStateOf(false) }
+                            LaunchedEffect(Unit) {
+                                val startedAt = SystemClock.elapsedRealtime()
+                                var loaded = false
+                                while (rootWaitsForSettings(
+                                        settingsLoaded = loaded,
+                                        waitedMillis = SystemClock.elapsedRealtime() - startedAt,
+                                        capMillis = LaunchIntroSettingsWaitMillis,
+                                    )
+                                ) {
+                                    // A bounded slice, so a wedged read re-enters the decision every
+                                    // pass instead of being able to hold the root past the cap.
+                                    loaded = withTimeoutOrNull(RootSettingsWaitSliceMillis) {
+                                        SettingsStore.awaitLoaded()
+                                        true
+                                    } == true
+                                }
+                                rootSettingsReady = true
+                            }
+                            if (rootSettingsReady) {
+                                MiruroRoot(
+                                    inPictureInPicture = inPictureInPicture,
+                                    onPictureInPictureReadyChanged = ::setPictureInPictureReady,
+                                    pendingRoute = pendingRoute,
+                                    onRouteConsumed = { pendingRoute = null },
+                                    pendingLink = pendingLink,
+                                    onLinkConsumed = { pendingLink = null },
+                                )
+                            }
                             AllAnimeCaptchaHost()
                             CloudflareChallengeHost()
                             AnnouncementHost()
@@ -443,7 +492,30 @@ class MainActivity : FragmentActivity() {
         super.onStart()
         DiagnosticsLog.event("MainActivity.onStart")
         PlaybackService.allowMediaButtonResume()
-        LibraryStore.refreshRemoteLibrary()
+        // The full remote-library refresh used to run on every onStart (#78) — including a
+        // deep-link cold start into Watch, where its uncached userAnimeList fetch lands exactly
+        // on the player's resolve, and the return from the launcher or the screensaver onto a
+        // player. The route on show (the deep link's destination before composition has seen it;
+        // the back stack's route otherwise) and the open-session flag decide. A refresh skipped
+        // here is parked in the store — so the one other unforced caller, Home's refresh on
+        // composition, is absorbed too — and taken at the next tab-route entry.
+        val sessionActive = PlaybackStatus.sessionActive.value
+        val route = lastComposedRoute
+            ?: pendingRoute
+            // An `anilili://watch` link lands in the player as well; the concrete route is only
+            // built once the link is processed, but the destination kind is known here.
+            ?: Routes.WATCH.takeIf { pendingLink is AnililiLink.Watch }
+        if (shouldRefreshOnStart(route, sessionActive)) {
+            // A qualifying start takes a player's parked refresh and otherwise refreshes as an
+            // ordinary return always did (#78) — takeParkedRemoteRefresh alone would no-op when
+            // nothing was parked and silently stop the everyday refresh.
+            LibraryStore.takeOrRunUnforcedRemoteRefresh()
+        } else {
+            LibraryStore.parkUnforcedRemoteRefresh()
+            DiagnosticsLog.event(
+                "Library refresh parked route=${route ?: "none"} sessionActive=$sessionActive",
+            )
+        }
         // A save the account never received — made offline, or during a service outage — is
         // re-offered here. No-ops unless something is actually outstanding.
         LibraryStore.retryPendingSavedSync()
@@ -583,7 +655,10 @@ class MainActivity : FragmentActivity() {
     override fun onStop() {
         super.onStop()
         DiagnosticsLog.event("MainActivity.onStop")
-        PlaybackService.pauseActivePlayback()
+        // #61: television parks the episode — pause, then stop — so the decoder and the buffer go
+        // with the screen instead of holding behind Home or the screensaver; phones keep the
+        // loaded pause that powers the notification's resume and the mini player.
+        PlaybackService.pauseOrParkActivePlayback(AppGraph.isTv)
         // The library encodes and writes its lists off the main thread now (#65); hold the
         // stop briefly so the last save still lands ahead of Android's queued-write wait.
         LibraryStore.flushPendingWrites()
@@ -839,6 +914,17 @@ private fun MiruroRoot(
 
     LaunchedEffect(currentRoute) {
         DiagnosticsLog.event("Nav route=${currentRoute ?: "none"}")
+        // Recorded for MainActivity.onStart, which judges the library refresh without a back-stack
+        // reference (#78); a player route having been current is also what makes a parked refresh
+        // takeable — see [hasSeenPlayerRoute].
+        lastComposedRoute = currentRoute
+        if (routeIsPlayerScreen(currentRoute)) hasSeenPlayerRoute = true
+        // The refresh parked by onStart (#78) is taken at the first tab-route entry after the
+        // viewer has been in a player: that is where they are back to browsing. Any other
+        // destination — an anime page, another player — may itself start playback and holds it.
+        if (currentRoute in Routes.tabRoutes && hasSeenPlayerRoute) {
+            LibraryStore.takeParkedRemoteRefresh()
+        }
     }
 
     LaunchedEffect(pendingRoute) {
@@ -1136,9 +1222,56 @@ private fun MiruroRoot(
 /** Frames to keep retrying the rail's initial focus on slow TV boxes before giving up. */
 /**
  * How long the TV launch waits for Settings before picking an intro. The read takes milliseconds;
- * past this the water-fill mark plays rather than keeping the screen blank.
+ * past this the water-fill mark plays rather than keeping the screen blank. The root's own wait
+ * before composing (#90) reuses the cap, so the two waits end together behind the splash.
  */
-private const val LaunchIntroSettingsWaitMillis = 1_000L
+internal const val LaunchIntroSettingsWaitMillis = 1_000L
+
+/**
+ * How often the root's settings wait re-checks its cap while a read is still in flight (#90). The
+ * wait is sliced rather than a single await so a wedged read re-enters the decision instead of
+ * being able to hold the root past the cap.
+ */
+private const val RootSettingsWaitSliceMillis = 100L
+
+/**
+ * Whether the app root should still wait for Settings before composing (#90).
+ *
+ * MiruroRoot reads settings flows — interface size, overscan, the theme — that only fill in once
+ * the asynchronous DataStore read has landed, so composing against the defaults first built and
+ * measured Home twice under the splash. The wait is bounded by [capMillis]: past it the root
+ * composes with whatever settings have landed, because a slow read must cost a default-shaped
+ * first frame, never a stuck splash.
+ */
+internal fun rootWaitsForSettings(
+    settingsLoaded: Boolean,
+    waitedMillis: Long,
+    capMillis: Long,
+): Boolean = !settingsLoaded && waitedMillis < capMillis
+
+/**
+ * Whether [MainActivity.onStart] may run the full remote-library refresh right now (#78).
+ *
+ * The refresh is the uncached full `userAnimeList`, so it waits until the viewer is not on or
+ * heading into a player: a session that is still open — prepared, paused, buffering, an embed —
+ * skips it, and so does a route that puts a player on screen, because the session flag cannot
+ * see a player that has not been prepared yet. A refresh skipped here is parked in the store
+ * and taken at the next tab-route entry, so deferring never loses it.
+ */
+internal fun shouldRefreshOnStart(route: String?, sessionActive: Boolean): Boolean =
+    !sessionActive && !routeIsPlayerScreen(route)
+
+/**
+ * Whether [route] puts a video player on screen — the streaming Watch destination or the
+ * downloaded player.
+ *
+ * [Routes.hostsPlayer] answers for the route *patterns*; the back stack and an intent extra carry
+ * instantiated routes (`watch/16/auto/sub/1`, `download/<id>`) or the patterns themselves, and a
+ * prefix check covers both. The Downloads tab shares the prefix but is a browsing page — the
+ * trailing slash is what keeps it out.
+ */
+internal fun routeIsPlayerScreen(route: String?): Boolean =
+    route != null && (route.startsWith("watch/") || route.startsWith("download/"))
 
 /**
  * Whether this launch may play the video intro at all; when it may, the Settings switch still

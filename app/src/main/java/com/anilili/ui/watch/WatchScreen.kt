@@ -314,15 +314,18 @@ fun WatchScreen(
             if (pictureInPictureReady) onPictureInPictureReadyChanged(false)
         }
     }
-    // YouTube-style leave: native playback PAUSES (media stays loaded, so the notification can
-    // resume it and re-entering the episode continues in place); the position is committed past
-    // the periodic-save throttle so "continue watching" lands exactly where the user left off.
-    // Embeds still stop — their WebView dies with this screen, so there is nothing to resume.
+    // YouTube-style leave: native playback pauses — and on television parks (#61), because a
+    // player left prepared behind this screen holds its codec and its buffer for as long as the
+    // viewer browses, while the phone keeps the loaded pause for the notification's resume and
+    // the mini player. The position is committed past the periodic-save throttle so "continue
+    // watching" lands exactly where the user left off; re-entering the episode re-prepares from
+    // there either way (PlayerSurface's reattachingToLoadedItem path). Embeds still stop — their
+    // WebView dies with this screen, so there is nothing to resume.
     val pauseAndBack = remember {
         {
             currentEmbeddedPlaybackStopper?.invoke()
             vm.commitPlaybackPosition()
-            PlaybackService.pauseActivePlayback()
+            PlaybackService.pauseOrParkActivePlayback(AppGraph.isTv)
             currentOnBack(currentPlayingEpisode)
         }
     }
@@ -426,13 +429,16 @@ fun WatchScreen(
 
     // Pause however the screen is left (back, Anime page, notification nav) — not just the
     // Back gesture. PiP keeps this screen composed, so picture-in-picture is unaffected.
-    // Pause rather than stop: the loaded session powers the notification's resume button,
-    // and background media-button events are suppressed so it can't restart by itself.
+    // Pause rather than stop on the phone: the loaded session powers the notification's resume
+    // button, and background media-button events are suppressed so it can't restart by itself.
+    // Television parks instead (#61) — pause, then stop — so leaving for the anime page or a tab
+    // releases the codec and the buffer rather than holding them behind Home; re-entering the
+    // episode re-prepares from the committed position either way.
     DisposableEffect(Unit) {
         onDispose {
             currentEmbeddedPlaybackStopper?.invoke()
             vm.commitPlaybackPosition()
-            PlaybackService.pauseActivePlayback()
+            PlaybackService.pauseOrParkActivePlayback(AppGraph.isTv)
         }
     }
 
