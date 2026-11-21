@@ -66,8 +66,18 @@ internal class AniDbAppProvider(
 
     /** Post ids the catalogue fallback placed by title, for this session only. */
     private val guessedPostIds = ConcurrentHashMap<Int, Int>()
-    private val episodeCache = ConcurrentHashMap<Int, List<Episode>>()
-    private val serverCache = ConcurrentHashMap<Int, List<Server>>()
+
+    /**
+     * Episode rows per matched post id, and server lists per episode id probed.
+     *
+     * One row set can reach a couple of thousand entries and one dub inference probes a server
+     * list a dozen times over (first, last, and a binary search between them), and before #72
+     * every set a session ever caused was held for the life of the process. Both are bounded now,
+     * least-recently-used out: [EPISODE_LISTS] titles, and [SERVER_LISTS] episode probes — enough
+     * that one title's dub search never evicts itself mid-walk.
+     */
+    private val episodeCache = BoundedLruMap<Int, List<Episode>>(capacity = EPISODE_LISTS)
+    private val serverCache = BoundedLruMap<Int, List<Server>>(capacity = SERVER_LISTS)
 
     fun cachedPostId(mediaId: Int): String? = exactPostIds[mediaId]?.toString()
 
@@ -261,7 +271,7 @@ internal class AniDbAppProvider(
     private fun episodes(postId: Int): List<Episode> {
         episodeCache[postId]?.let { return it }
         val parsed = AniDbAppParser.episodes(json.parseToJsonElement(playGet("anime/$postId/episodes")))
-        if (parsed.isNotEmpty()) episodeCache[postId] = parsed
+        if (parsed.isNotEmpty()) episodeCache.put(postId, parsed)
         return parsed
     }
 
@@ -269,7 +279,7 @@ internal class AniDbAppProvider(
         serverCache[episode.id]?.let { return it }
         val parsed = AniDbAppParser.servers(json.parseToJsonElement(playGet("episode/${episode.id}/servers")))
         // Empty results can be a temporary upstream state, so only retain positive responses.
-        if (parsed.isNotEmpty()) serverCache[episode.id] = parsed
+        if (parsed.isNotEmpty()) serverCache.put(episode.id, parsed)
         return parsed
     }
 
@@ -347,6 +357,16 @@ internal class AniDbAppProvider(
         private const val MAX_IDENTITY_CANDIDATES = 8
         private const val MAX_CATALOGUE_CANDIDATES = 6
         private const val MIN_TITLE_SCORE = 0.28
+
+        /**
+         * How many titles' episode rows and how many episodes' server lists are kept (#72). Sixteen
+         * titles matches `PipeClient`'s episode-list bound, for the same "titles in one session"
+         * quantity. Sixty-four episode probes: one dub inference on a long-running title is a
+         * binary search — first, last and ~log2(rows) probes between them, thirteen for One Piece —
+         * so sixty-four keeps several such searches warm without one evicting itself mid-walk.
+         */
+        private const val EPISODE_LISTS = 16
+        private const val SERVER_LISTS = 64
         private const val USER_AGENT = "Miruro Android/1.0"
     }
 }
