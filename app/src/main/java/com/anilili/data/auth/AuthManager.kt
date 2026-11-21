@@ -4,6 +4,7 @@ import android.content.Context
 import android.net.Uri
 import android.util.Base64
 import java.security.SecureRandom
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import com.anilili.data.reminder.AniListNotificationPushManager
@@ -32,9 +33,16 @@ object AuthManager {
     private val _token = MutableStateFlow<String?>(null)
     val token = _token.asStateFlow()
 
-    fun init(context: Context) {
+    fun init(context: Context, startupScope: CoroutineScope) {
         appContext = context.applicationContext
         tokenStore = SecureTokenStore(appContext)
+        // #87: the policy keeps the AniList decrypt on the calling thread — it is the only token
+        // the first Home frame needs — so this behaves exactly as it did before the other four
+        // moved off Main.
+        restoreOnStartup(StartupTokenService.ANILIST, startupScope, ::restoreStoredToken)
+    }
+
+    private fun restoreStoredToken() {
         _token.value = tokenStore.load()?.takeUnless(::isJwtExpired)
         if (_token.value == null) tokenStore.clear()
     }

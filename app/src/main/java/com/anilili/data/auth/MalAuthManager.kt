@@ -5,6 +5,7 @@ import android.net.Uri
 import android.util.Base64
 import com.anilili.diagnostics.DiagnosticsLog
 import java.security.SecureRandom
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -53,9 +54,14 @@ object MalAuthManager {
     /** UI-observable login state (token value itself stays internal). */
     val loggedIn = MutableStateFlow(false)
 
-    fun init(context: Context, client: OkHttpClient) {
+    fun init(context: Context, client: OkHttpClient, startupScope: CoroutineScope) {
         tokenStore = SecureTokenStore(context.applicationContext, SecureTokenStore.KEY_MAL_TOKENS)
         httpClient = client
+        // #87: the Keystore decrypt moves off Main; the StateFlows below publish whatever it finds.
+        restoreOnStartup(StartupTokenService.MAL, startupScope, ::restoreStoredTokens)
+    }
+
+    private fun restoreStoredTokens() {
         _tokens.value = tokenStore.load()?.let { raw ->
             runCatching { json.decodeFromString(MalTokens.serializer(), raw) }.getOrNull()
         }

@@ -94,19 +94,37 @@ internal class SecureTokenStore(context: Context, private val slotKey: String = 
         }
 
     private fun softwareSecretKey(): SecretKey {
-        val stored = prefs.getString(KEY_SOFTWARE_KEY, null)
-        val bytes = if (stored != null) {
-            Base64.decode(stored, Base64.NO_WRAP)
-        } else {
-            ByteArray(32).also(SecureRandom()::nextBytes).also { generated ->
-                prefs.edit().putString(KEY_SOFTWARE_KEY, Base64.encodeToString(generated, Base64.NO_WRAP)).apply()
+        // Under the same lock as the hardware path (#87): the deferred restores can reach this
+        // concurrently on the first use of a device whose Keystore HAL is broken, and two racing
+        // generations would write rival keys and strand the loser's ciphertext.
+        synchronized(keyLock) {
+            val stored = prefs.getString(KEY_SOFTWARE_KEY, null)
+            val bytes = if (stored != null) {
+                Base64.decode(stored, Base64.NO_WRAP)
+            } else {
+                ByteArray(32).also(SecureRandom()::nextBytes).also { generated ->
+                    prefs.edit().putString(KEY_SOFTWARE_KEY, Base64.encodeToString(generated, Base64.NO_WRAP)).apply()
+                }
             }
+            return SecretKeySpec(bytes, "AES")
         }
-        return SecretKeySpec(bytes, "AES")
     }
 
     @RequiresApi(Build.VERSION_CODES.M)
     private fun hardwareSecretKey(): SecretKey {
+        // #87: one alias lives in AndroidKeyStore for every slot, and reading it costs a binder
+        // round-trip per load — which the deferred token restores below multiply into concurrent
+        // ones. Cache the decrypted key process-wide; double-checked against the same lock the
+        // software path uses. The key is never invalidated (it is not bound to user
+        // authentication), so a per-process cache cannot go stale.
+        cachedHardwareKey?.let { return it }
+        return synchronized(keyLock) {
+            cachedHardwareKey ?: loadOrCreateHardwareKey().also { cachedHardwareKey = it }
+        }
+    }
+
+    @RequiresApi(Build.VERSION_CODES.M)
+    private fun loadOrCreateHardwareKey(): SecretKey {
         val keyStore = KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
         (keyStore.getKey(KEY_ALIAS, null) as? SecretKey)?.let { return it }
         return KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, ANDROID_KEYSTORE).run {
@@ -148,5 +166,10 @@ internal class SecureTokenStore(context: Context, private val slotKey: String = 
         const val GCM_TAG_BITS = 128
         private const val SOFTWARE_KEY_PREFIX = "s"
         private const val KEY_SOFTWARE_KEY = "legacy_api22_software_key"
+
+        /** Guards [cachedHardwareKey] and software-key generation across instances (#87). */
+        private val keyLock = Any()
+
+        @Volatile private var cachedHardwareKey: SecretKey? = null
     }
 }

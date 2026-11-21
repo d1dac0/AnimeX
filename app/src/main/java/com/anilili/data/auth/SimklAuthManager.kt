@@ -137,10 +137,15 @@ object SimklAuthManager {
      */
     val signIn = _signIn.asStateFlow()
 
-    fun init(context: Context, client: OkHttpClient) {
+    fun init(context: Context, client: OkHttpClient, startupScope: CoroutineScope) {
         tokenStore = SecureTokenStore(context.applicationContext, SecureTokenStore.KEY_SIMKL_TOKENS)
         pendingStore = SecureTokenStore(context.applicationContext, SecureTokenStore.KEY_SIMKL_PENDING_AUTH)
         httpClient = client
+        // #87: the Keystore decrypt moves off Main; the StateFlows below publish whatever it finds.
+        restoreOnStartup(StartupTokenService.SIMKL, startupScope, ::restoreStoredTokens)
+    }
+
+    private fun restoreStoredTokens() {
         _tokens.value = tokenStore.load()?.let { raw ->
             runCatching { json.decodeFromString(SimklTokens.serializer(), raw) }.getOrNull()
         }

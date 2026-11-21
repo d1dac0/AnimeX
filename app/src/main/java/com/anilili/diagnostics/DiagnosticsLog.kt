@@ -53,6 +53,10 @@ object DiagnosticsLog {
     private const val MAX_EXIT_TRACE_BYTES = 1_500_000L
     private const val PROCESS_STATE_MIN_INTERVAL_MS = 5_000L
     private const val MAX_RECENT_SUMMARY_EVENTS = 160
+
+    /** The label MiruroApp.onTrimMemory passes; the one snapshot burst worth throttling (#82). */
+    private const val TRIM_MEMORY_LABEL = "trimMemory"
+    private const val TRIM_MEMORY_MIN_INTERVAL_MS = 30_000L
     private val categorySanitizer = Regex("[^A-Za-z0-9_-]")
     private val eventNameSanitizer = Regex("[^A-Za-z0-9_.-]")
     private val processSuffixSanitizer = Regex("[^A-Za-z0-9_.-]")
@@ -68,6 +72,12 @@ object DiagnosticsLog {
     private val sessionId = UUID.randomUUID().toString()
     private val processStartedElapsedMs = SystemClock.elapsedRealtime()
     private val sequence = AtomicLong(0)
+
+    /**
+     * Decided on the calling thread so a throttled trim burst does not even queue work, then
+     * accepted snapshots collect on the sampler thread (#82).
+     */
+    private val trimSnapshotThrottle = SnapshotThrottle(minIntervalMs = TRIM_MEMORY_MIN_INTERVAL_MS)
 
     fun init(context: Context) {
         val app = context.applicationContext
@@ -266,6 +276,24 @@ object DiagnosticsLog {
     }
 
     fun snapshot(context: Context, label: String) {
+        // #82: systemSnapshot reads ActivityManager, the battery sticky intent, display and HDR
+        // capabilities, thermal status and storage — all binder calls — and every lifecycle call
+        // site reaches this on Main, onTrimMemory in bursts during playback. Post the collection
+        // to the anilili-performance thread so the entry point stays fire-and-forget for the
+        // caller while the work moves off the caller's thread. The app Context is what the
+        // collection reads, so capturing the caller's `this` is safe to defer.
+        val app = context.applicationContext
+        if (label == TRIM_MEMORY_LABEL && !trimSnapshotThrottle.accepts(TRIM_MEMORY_LABEL)) return
+        runCatching { DiagnosticsPerformanceMonitor.ensureHandler(app).post { recordSystemSnapshot(app, label) } }
+            .onFailure { recordSystemSnapshot(app, label) }
+    }
+
+    /**
+     * The report ZIP reads the event files it was built from, so its own snapshot has to be in
+     * them before [flush] runs. The share flow already collects on a background thread, which is
+     * why this path may stay synchronous when [snapshot] posts.
+     */
+    private fun recordSystemSnapshot(context: Context, label: String) {
         event(
             category = "system",
             name = "system.snapshot",
@@ -426,7 +454,10 @@ object DiagnosticsLog {
         description: String = "",
         screenshot: DiagnosticScreenshot? = null,
     ): File {
-        snapshot(context, "report-generation")
+        // Collected inline rather than through snapshot(): the report below reads the event files
+        // this writes, and a posted snapshot could land after the flush. The caller is already on
+        // a background thread.
+        recordSystemSnapshot(context, "report-generation")
         flush()
         val diagnosticsDir = diagnosticsDirectory(context)
         val outputDirectory = File(context.cacheDir, LOG_DIR).apply { mkdirs() }
