@@ -16,6 +16,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.sync.Mutex
@@ -55,6 +57,14 @@ object LibraryStore {
     private lateinit var prefs: SharedPreferences
     private lateinit var appContext: Context
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    /**
+     * List writes go through the queue so a playback-time save never encodes on the caller's
+     * thread (#65). The prefs field is only touched when a write actually runs, after init.
+     */
+    private val persistQueue = LibraryPersistQueue(scope) { key, encoded ->
+        prefs.edit().putString(key, encoded).apply()
+    }
     private val aniListSyncMutex = Mutex()
     private var remoteRefreshJob: Job? = null
     @Volatile private var lastRemoteRefreshAt = 0L
@@ -888,8 +898,23 @@ object LibraryStore {
     // ---- persistence ----
 
     private fun <T> persist(key: String, list: List<T>, serializer: kotlinx.serialization.KSerializer<T>) {
-        val encoded = json.encodeToString(kotlinx.serialization.builtins.ListSerializer(serializer), list)
-        prefs.edit().putString(key, encoded).apply()
+        // The encode runs on the store's IO scope (#65); the caller's in-memory state was
+        // already updated synchronously, and this only decides when the bytes reach disk.
+        persistQueue.persist(key) {
+            json.encodeToString(kotlinx.serialization.builtins.ListSerializer(serializer), list)
+        }
+    }
+
+    /**
+     * Hold the caller (MainActivity.onStop) until every accepted write has reached
+     * SharedPreferences' in-memory map, so Android's queued-write wait after onStop still
+     * covers the disk write of the last save (#65). Bounded: a stalled encode must not pin
+     * the activity's stop transition.
+     */
+    fun flushPendingWrites(timeoutMs: Long = 2_000L) {
+        runBlocking {
+            withTimeoutOrNull(timeoutMs) { persistQueue.flush() }
+        }
     }
 
     /**
