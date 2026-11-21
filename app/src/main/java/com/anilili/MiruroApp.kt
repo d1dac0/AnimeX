@@ -204,9 +204,26 @@ class MiruroApp : Application(), ImageLoaderFactory {
         // its own disk cache below, and leaving OkHttp's 50 MB one attached would store every
         // poster twice over — and let image traffic evict the API responses that cache exists for.
         .okHttpClient { AppGraph.httpClient.newBuilder().cache(null).build() }
+        // #89: RGB_565 halves what a decoded poster holds. On API 22-25 that heap is Java-heap
+        // bytes; from 26 bitmaps are hardware and the flag stops paying, except on a low-RAM
+        // device, which keeps it. The decision and its arithmetic live in
+        // ImageLoaderMemoryPolicy so the JVM suite can hold them.
+        .allowRgb565(
+            ImageLoaderMemoryPolicy.rgb565Allowed(
+                Build.VERSION.SDK_INT,
+                AppGraph.isTv,
+                AppGraph.isLowRamDevice,
+            ),
+        )
         .memoryCache {
             MemoryCache.Builder(this)
-                .maxSizePercent(if (AppGraph.isTv) 0.12 else 0.25)
+                // #89: sized from the heap the process actually gets rather than from the memory
+                // class Coil's maxSizePercent would pick — on low-RAM devices, which ignore
+                // largeHeap, that class overstated the share of the real heap. Same 12%/25%
+                // shares, different base.
+                .maxSizeBytes(
+                    ImageLoaderMemoryPolicy.coilMemoryCacheBytes(Runtime.getRuntime().maxMemory(), AppGraph.isTv),
+                )
                 .build()
         }
         .diskCache {
