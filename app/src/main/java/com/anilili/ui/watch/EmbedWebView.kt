@@ -274,6 +274,15 @@ fun EmbedWebView(
     // so the URL travels with the message and the effect below discards a stale one.
     var pagePlayerError by remember { mutableStateOf<Pair<String, String>?>(null) }
     var webView by remember { mutableStateOf<WebView?>(null) }
+    // Bumped when the renderer dies. The platform says a WebView "can't be used" after
+    // onRenderProcessGone, yet the AndroidView stayed mounted and the next embed (a fallback is
+    // the usual next step) was loaded into the dead instance. Keying the view on this builds a
+    // fresh one and lets the dead one go through onRelease.
+    var rendererGeneration by remember { mutableIntStateOf(0) }
+    // Views whose renderer is gone: their release skips the page calls and only tears them down.
+    val deadRendererViews = remember {
+        java.util.Collections.newSetFromMap(java.util.WeakHashMap<WebView, Boolean>())
+    }
     var finishedUrl by remember(activeUrl) { mutableStateOf<String?>(null) }
     val currentOnPlaybackStopperChanged by rememberUpdatedState(onPlaybackStopperChanged)
     val currentOnFullscreenChanged by rememberUpdatedState(onFullscreenChanged)
@@ -1285,7 +1294,15 @@ fun EmbedWebView(
                     currentActiveUrl,
                     currentPositionMs(),
                 )
-                if (webView === view) webView = null
+                view?.let(deadRendererViews::add)
+                if (webView === view) {
+                    webView = null
+                    // The fresh view has loaded nothing yet, so whichever URL is active once it
+                    // is built — the fallback's, or this one again if nothing moved — is loaded.
+                    lastRequestedUrl.value = null
+                    rendererGeneration++
+                    DiagnosticsLog.event("EmbedWebView renderer gone; rebuilding generation=$rendererGeneration")
+                }
                 return true
             }
         }
@@ -1567,6 +1584,7 @@ fun EmbedWebView(
             )
             }
         }
+        androidx.compose.runtime.key(rendererGeneration) {
         AndroidView(
             modifier = Modifier.fillMaxSize(),
             factory = { ctx ->
@@ -1814,8 +1832,14 @@ fun EmbedWebView(
             onRelease = { view ->
                 val web = view as? WebView ?: return@AndroidView
                 if (webView === web) webView = null
-                DiagnosticsLog.event("EmbedWebView release url=${web.url ?: "none"} size=${web.width}x${web.height}")
-                stopWebPlayback(web)
+                val rendererGone = deadRendererViews.remove(web)
+                DiagnosticsLog.event(
+                    "EmbedWebView release url=${web.url ?: "none"} size=${web.width}x${web.height} " +
+                        "rendererGone=$rendererGone",
+                )
+                // A dead renderer has no page to pause or blank, and a load would only ask the
+                // view to start another one.
+                if (!rendererGone) stopWebPlayback(web)
                 web.removeJavascriptInterface("AniliProgress")
                 web.clearHistory()
                 web.removeAllViews()
@@ -1825,6 +1849,7 @@ fun EmbedWebView(
                 web.destroy()
             },
         )
+        }
         }
 
         CompiledSeparately {
