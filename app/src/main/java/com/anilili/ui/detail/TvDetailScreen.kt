@@ -70,6 +70,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
@@ -84,6 +85,7 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.InputMode
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
@@ -92,6 +94,7 @@ import androidx.compose.ui.input.key.type
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalInputModeManager
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
@@ -119,6 +122,7 @@ import com.anilili.data.model.EPISODE_WATCHABLE_AFTER_SEC
 import com.anilili.data.model.episodeIsUnaired
 import com.anilili.data.settings.EpisodeOrder
 import com.anilili.data.settings.SettingsStore
+import com.anilili.diagnostics.DiagnosticsLog
 import com.anilili.ui.adaptive.FocusFillColor
 import com.anilili.ui.adaptive.focusHalo
 import com.anilili.ui.adaptive.TvCardCornerShape
@@ -204,6 +208,26 @@ private const val TV_EPISODE_CHIPS_MIN_EPISODES = 30
 
 /** Frames to wait for the Find field or chip to be composed before handing it the cursor. */
 private const val FIND_FOCUS_ATTEMPTS = 30
+
+/**
+ * Frames the page keeps asking for its first focus — the Watch button, or the card the player's
+ * Back named — before it gives up. The same budget the navigation bar spends: slow Fire TV boxes
+ * run the first request before the node is attached, and one swallowed attempt left nothing
+ * focused and a remote that did nothing.
+ */
+private const val TV_DETAIL_FOCUS_ATTEMPTS = 10
+
+/**
+ * Asks [request] once a frame, up to [attempts] times, until it answers that focus landed.
+ * Returns the attempt it landed on, or null when it never did.
+ */
+private suspend fun retryTvFocus(attempts: Int, request: () -> Boolean): Int? {
+    repeat(attempts) { attempt ->
+        if (request()) return attempt + 1
+        withFrameNanos { }
+    }
+    return null
+}
 
 private const val TV_HOLD_STEP_AFTER = 12
 private const val TV_HOLD_STEP_EVERY = 3
@@ -359,6 +383,37 @@ internal fun TvDetailContent(
     val backdrop = described?.image?.takeIf { !blurEpisodeImages } ?: seasonArtwork
 
     val saveActionFocusRequester = remember { FocusRequester() }
+    val canWatch = episodes.isNotEmpty() || seasonResume != null
+    val currentCanWatch by rememberUpdatedState(canWatch)
+    // Whether anything on the page holds the cursor. Read straight after each request rather than
+    // observed — focus events are dispatched inside requestFocus — so a request that did nothing
+    // (a disabled button, a node not attached yet) is told apart from one that landed.
+    val pageFocused = remember { mutableStateOf(false) }
+    val inputModeManager = LocalInputModeManager.current
+    val focusScope = rememberCoroutineScope()
+    // Mouse navigation leaves Compose in Touch mode, so the page asks for Keyboard mode first.
+    // Watch is disabled on an announced season and on an uncounted one still loading, and a request
+    // on a disabled button lands nowhere; the list button beside it is always there to take it.
+    val focusFirstAction: suspend () -> Unit = {
+        val keyboardMode = inputModeManager.requestInputMode(InputMode.Keyboard)
+        var target = "watch"
+        val attempts = retryTvFocus(TV_DETAIL_FOCUS_ATTEMPTS) {
+            val watch = currentCanWatch
+            target = if (watch) "watch" else "list"
+            runCatching { (if (watch) primaryActionFocusRequester else saveActionFocusRequester).requestFocus() }
+            pageFocused.value
+        }
+        DiagnosticsLog.event(
+            "Detail primary action focus requested keyboardMode=$keyboardMode target=$target " +
+                "landed=${attempts != null} attempts=${attempts ?: TV_DETAIL_FOCUS_ATTEMPTS}",
+        )
+    }
+    // An arrival from the player hands the cursor to the episode strip instead, so this must not
+    // fire alongside it: the two would race and whichever landed last would win. The strip hands
+    // back here if its card never takes the cursor.
+    LaunchedEffect(arrivalEpisode != null) {
+        if (arrivalEpisode == null) focusFirstAction()
+    }
     // Where Up leaves the episode strip for. Compose's own search out of the range chips finds no
     // candidate above and drops focus entirely — measured on device, the dump holds no focused node
     // at all afterwards — so the tab strip is named explicitly, the same hand-off the home rails use.
@@ -459,7 +514,12 @@ internal fun TvDetailContent(
     }.distinctBy { it.media.id }
 
     val canvas = MaterialTheme.colorScheme.background
-    Box(Modifier.fillMaxSize().background(canvas)) {
+    Box(
+        Modifier
+            .fillMaxSize()
+            .onFocusChanged { pageFocused.value = it.hasFocus }
+            .background(canvas),
+    ) {
         AsyncImage(
             model = backdrop,
             contentDescription = null,
@@ -510,7 +570,7 @@ internal fun TvDetailContent(
                 resume = seasonResume,
                 saved = saved,
                 listStatusLabel = listStatusLabel,
-                canWatch = episodes.isNotEmpty() || seasonResume != null,
+                canWatch = canWatch,
                 onWatch = playCurrent,
                 onStudioClick = onStudioClick,
                 downloadPreparing = downloads.batchPreparing,
@@ -571,6 +631,7 @@ internal fun TvDetailContent(
                     onPlay = playEpisode,
                     onToggleWatched = toggleWatched,
                     arrivalFocusPipeId = arrivalEpisode?.pipeId,
+                    onArrivalFocusMissed = { focusScope.launch { focusFirstAction() } },
                     openOnPipeId = startEpisode?.pipeId,
                     upFocusTarget = tabsFocusTarget,
                     seasons = data.seasons,
@@ -1405,6 +1466,8 @@ private fun TvEpisodeStrip(
     onToggleWatched: (EpisodeItem) -> Unit,
     /** The episode the player's Back named, to receive the cursor once its card exists. */
     arrivalFocusPipeId: String? = null,
+    /** Told when that card never took the cursor, so the page can place it somewhere else. */
+    onArrivalFocusMissed: () -> Unit = {},
     /** The episode the strip opens scrolled to, when it is among [episodes]. */
     openOnPipeId: String? = null,
     /** The tab strip's target, for the Up hand-off out of the range chips. */
@@ -1485,6 +1548,8 @@ private fun TvEpisodeStrip(
     val focusTargets = remember(episodes.firstOrNull()?.pipeId, episodes.size) {
         List(episodes.size) { TvFocusTarget() }
     }
+    // The effects below retry across frames, and the list of targets can be replaced in between.
+    val currentFocusTargets by rememberUpdatedState(focusTargets)
     // Seeded with the card the strip opens on, so the first Down into it lands there rather than
     // on whichever card happens to sit under the chip above — on a long series that was a card
     // several along from the newest episode the strip had just scrolled to.
@@ -1522,12 +1587,19 @@ private fun TvEpisodeStrip(
         if (target < 0 || arrivalFocusTaken) return@LaunchedEffect
         listState.scrollToItem(target + leadingItems)
         withFrameNanos { }
-        focusTargets.getOrNull(target)
-            ?.takeIf(TvFocusTarget::isAttached)
-            ?.let {
-                runCatching { it.requester.requestFocus() }
-                arrivalFocusTaken = true
-            }
+        // Retried like the page's first focus: on a slow box the card can still be unattached a
+        // frame after the scroll, and one attempt that missed left nothing focused.
+        val attempts = retryTvFocus(TV_DETAIL_FOCUS_ATTEMPTS) {
+            val card = currentFocusTargets.getOrNull(target)?.takeIf(TvFocusTarget::isAttached)
+                ?: return@retryTvFocus false
+            runCatching { card.requester.requestFocus() }.isSuccess && card.holdsFocus
+        }
+        arrivalFocusTaken = true
+        DiagnosticsLog.event(
+            "Detail arrival episode focus requested landed=${attempts != null} " +
+                "attempts=${attempts ?: TV_DETAIL_FOCUS_ATTEMPTS}",
+        )
+        if (attempts == null) onArrivalFocusMissed()
     }
 
     val stepBy: (Int) -> Boolean = step@{ delta ->
