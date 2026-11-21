@@ -101,7 +101,10 @@ class LocalStreamProxyService : Service() {
 
     companion object {
         private const val CHANNEL_ID = "external_playback"
-        private const val NOTIFICATION_ID = 7_301
+        // Distinct from EpisodeExportWorker's 7_301: both can be foreground at once, and a shared
+        // id let the export's setForeground overwrite this ongoing notification and WorkManager
+        // clear it when the export finished.
+        private const val NOTIFICATION_ID = 7_401
         private const val OPEN_REQUEST_CODE = 7_302
         private const val STOP_REQUEST_CODE = 7_303
         private const val ACTION_STOP = "com.anilili.playback.STOP_LOCAL_STREAM_PROXY"
