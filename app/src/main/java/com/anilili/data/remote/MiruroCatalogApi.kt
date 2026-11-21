@@ -40,7 +40,17 @@ import okhttp3.Request
  */
 internal object MiruroCatalogApi {
 
-    private val client = OkHttpClient.Builder()
+    /**
+     * The client every Miruro request shares, in one form or another.
+     *
+     * [OkHttpPipe] derives its own from this one with `newBuilder()` (#73): the catalog and the
+     * retired pipe speak to the same five mirrors, and two independent clients meant two
+     * ConnectionPools and two Dispatchers against them — a TLS handshake apiece per mirror and
+     * idle sockets held twice over. Deriving shares both and inherits the trust anchors and the
+     * diagnostics listener; only the deadlines differ, and the pipe states its own on top.
+     * Internal so [OkHttpPipe] can derive and `MirrorConnectionPoolTest` can prove the sharing.
+     */
+    internal val client = OkHttpClient.Builder()
         .withLegacyTrustAnchors()
         .callTimeout(20, TimeUnit.SECONDS)
         .connectTimeout(10, TimeUnit.SECONDS)

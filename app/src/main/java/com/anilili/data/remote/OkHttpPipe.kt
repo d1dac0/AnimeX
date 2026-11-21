@@ -1,9 +1,7 @@
 package com.anilili.data.remote
 
 import android.os.SystemClock
-import com.anilili.diagnostics.DiagnosticsHttpEventListener
 import com.anilili.diagnostics.DiagnosticsLog
-import com.anilili.data.remote.LegacyTrustAnchors.withLegacyTrustAnchors
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
@@ -64,17 +62,24 @@ internal fun pipeWalkContinuesAfter(status: Int): Boolean = status != PIPE_NOT_T
  */
 object OkHttpPipe {
 
-    private val client = OkHttpClient.Builder()
-        .withLegacyTrustAnchors()
+    /**
+     * Derived from [MiruroCatalogApi]'s client with `newBuilder()` (#73): the catalog and this pipe
+     * speak to the same five mirrors, and separate clients meant separate ConnectionPools and
+     * Dispatchers against them — a TLS handshake apiece per mirror, and idle sockets held twice
+     * over. Deriving shares both, and inherits the catalog client's trust anchors and diagnostics
+     * listener; only the deadlines differ, kept exactly as this client stated them before the
+     * sharing. Internal so `MirrorConnectionPoolTest` can prove the sharing.
+     *
+     * That inherited listener is load-bearing: the pipe not reporting meant a diagnostics bundle
+     * carried 400-odd `http.call.complete` rows without a single Miruro host in them — the one
+     * request the whole Miruro half of the app depends on was the one request that could not be
+     * read. Successes are invisible otherwise — only [preferred] changing logs anything — so "did
+     * the pipe work at all" was a question the archive could not answer.
+     */
+    internal val client = MiruroCatalogApi.client.newBuilder()
         .callTimeout(30, TimeUnit.SECONDS)
         .connectTimeout(15, TimeUnit.SECONDS)
         .readTimeout(30, TimeUnit.SECONDS)
-        // Every other client in the app reports through this, and the pipe not doing so meant a
-        // diagnostics bundle carried 400-odd `http.call.complete` rows without a single Miruro host
-        // in them: the one request the whole Miruro half of the app depends on was the one request
-        // that could not be read. Successes are invisible otherwise — only [preferred] changing
-        // logs anything — so "did the pipe work at all" was a question the archive could not answer.
-        .eventListenerFactory(DiagnosticsHttpEventListener.Factory)
         .build()
 
     /**

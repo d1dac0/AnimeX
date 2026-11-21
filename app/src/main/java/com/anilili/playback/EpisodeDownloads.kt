@@ -316,17 +316,6 @@ object EpisodeDownloads {
     private lateinit var upstreamFactory: DataSource.Factory
     private lateinit var manager: DownloadManager
     private lateinit var userAgent: String
-    private val subtitleClient = OkHttpClient.Builder()
-        .addInterceptor(com.anilili.data.remote.MegaPlayCdnHealthInterceptor())
-        .withLegacyTrustAnchors()
-        .dns(AppDns)
-        .addInterceptor(AppDns.InterceptionRetry)
-        .eventListenerFactory(DiagnosticsHttpEventListener.Factory)
-        .followRedirects(true)
-        .followSslRedirects(true)
-        .connectTimeout(20, TimeUnit.SECONDS)
-        .readTimeout(30, TimeUnit.SECONDS)
-        .build()
 
     /**
      * Segment transport for the downloader.
@@ -336,8 +325,11 @@ object EpisodeDownloads {
      * patience [PlaybackService] and [LocalStreamProxy] give the very same CDNs. Segments here run
      * to four megabytes and a busy host routinely takes fifteen to twenty seconds over one, so the
      * short read timeout turned a slow server into a hard error and handed it to a retry loop.
+     *
+     * Declared before [subtitleClient], which derives from it (#73). Internal so
+     * `MirrorConnectionPoolTest` can prove that sharing.
      */
-    private val downloadHttpClient = OkHttpClient.Builder()
+    internal val downloadHttpClient = OkHttpClient.Builder()
         .addInterceptor(com.anilili.data.remote.MegaPlayCdnHealthInterceptor())
         .withLegacyTrustAnchors()
         .dns(AppDns)
@@ -349,6 +341,18 @@ object EpisodeDownloads {
         .connectTimeout(20, TimeUnit.SECONDS)
         .readTimeout(30, TimeUnit.SECONDS)
         .build()
+
+    /**
+     * Transport for sidecar subtitle files, derived from [downloadHttpClient] with `newBuilder()`
+     * (#73). Subtitles and the segments they ride beside come from the same CDNs, and a second
+     * independent client meant a second ConnectionPool and Dispatcher for them — duplicate TLS
+     * handshakes, idle sockets held twice over. Deriving shares both, and the configuration it
+     * inherits was already this client's own down to the letter: the same interceptors, DNS,
+     * redirects, 20s/30s deadlines, and `retryOnConnectionFailure`, which the subtitle client left
+     * at OkHttp's default of true rather than stating. Nothing about these requests changes except
+     * that they reuse the downloader's connections.
+     */
+    internal val subtitleClient = downloadHttpClient.newBuilder().build()
 
     fun downloads(context: Context): StateFlow<List<EpisodeDownload>> {
         initialize(context)
