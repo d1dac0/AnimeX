@@ -4,8 +4,10 @@ import android.os.Build
 import com.anilili.diagnostics.DiagnosticsLog
 import java.io.ByteArrayInputStream
 import java.security.KeyStore
+import java.security.cert.CertificateException
 import java.security.cert.CertificateFactory
 import java.security.cert.X509Certificate
+import java.util.concurrent.atomic.AtomicBoolean
 import javax.net.ssl.SSLContext
 import javax.net.ssl.TrustManagerFactory
 import javax.net.ssl.X509TrustManager
@@ -45,6 +47,15 @@ import okhttp3.OkHttpClient
  * user or enterprise anchor is dropped. From API 25 up the platform has this root itself and gets
  * to do its own verification, which is better than ours — hence the version gate rather than
  * installing this everywhere.
+ *
+ * Since #88, none of that work happens at startup. AppGraph.init used to enumerate the system
+ * store through `acceptedIssuers`, copy it into a fresh KeyStore and run a second
+ * TrustManagerFactory just to have the merged manager ready — on the main thread of the slowest
+ * devices supported. Now the client gets a delegating manager that answers with the platform's own
+ * verdict first and consults the bundled root only when the platform has said no, and the
+ * ISRG-only manager behind it is built on demand, on whichever thread first presents a chain the
+ * platform cannot verify — the first Let's Encrypt handshake. Chains the platform accepts never
+ * reach the fallback, so what the device trusts is not re-decided here.
  */
 object LegacyTrustAnchors {
 
@@ -98,44 +109,65 @@ emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
             as X509Certificate
 
     /**
-     * The merged trust manager, or null when the platform's own is already sufficient or the merge
-     * could not be built.
+     * The platform's own manager, from the same default TrustManagerFactory the default client
+     * uses, so what the device trusts is not re-decided here. Shared by every client that installs
+     * the delegating manager — a trust check keeps no state between calls — and built the first
+     * time a client builder asks.
      *
-     * Built once. A failure here must leave the client alone rather than take the app's networking
-     * with it: an unmodified client is exactly as capable as before this existed, whereas a
-     * half-built SSL context is not.
+     * Building this is all the trust work left on the startup path (#88). Over the system
+     * AndroidCAStore the platform loads its own roots lazily on the first check — the AOSP source
+     * bears this out for every API level the gate below covers, 22 through 24 — and it is
+     * `acceptedIssuers` that forces a whole-store enumeration, which is exactly what the old
+     * merged manager called during AppGraph.init. Nothing here does.
      */
-    private val trustManager: X509TrustManager? by lazy {
-        if (!needsBundledIsrgRoot(Build.VERSION.SDK_INT)) return@lazy null
+    private val platformTrustManager: X509TrustManager? by lazy {
         runCatching {
-            val store = KeyStore.getInstance(KeyStore.getDefaultType()).apply { load(null, null) }
-            // Everything the platform trusts, kept. Read from the default trust manager rather
-            // than from a file, so device and enterprise anchors come along too.
-            val platform = TrustManagerFactory
-                .getInstance(TrustManagerFactory.getDefaultAlgorithm())
+            TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm())
                 .apply { init(null as KeyStore?) }
                 .trustManagers
                 .filterIsInstance<X509TrustManager>()
-                .flatMap { it.acceptedIssuers.asList() }
-            platform.forEachIndexed { index, certificate ->
-                store.setCertificateEntry("system-$index", certificate)
-            }
+                .firstOrNull()
+        }.onFailure {
+            DiagnosticsLog.throwable("LegacyTrustAnchors could not read the platform trust store", it)
+        }.getOrNull()
+    }
+
+    /**
+     * The ISRG-only trust manager, or null when it could not be built.
+     *
+     * Built on demand (#88), the first time the platform manager rejects a chain. Its store holds
+     * exactly one certificate, so the enumeration a custom KeyStore forces on the manager built
+     * from it is trivial next to the old merged store's, and it runs on the handshake's thread
+     * rather than Main.
+     *
+     * `lazy` is SYNCHRONIZED, so two handshakes rejected at once build it once, and a failure is
+     * cached as null: from there on every handshake gets the platform verdict, which is exactly
+     * the behavior a device had before this file existed.
+     */
+    private val isrgOnlyTrustManager: X509TrustManager? by lazy {
+        runCatching {
+            val store = KeyStore.getInstance(KeyStore.getDefaultType()).apply { load(null, null) }
+            // ISRG Root X1 alone. The platform's anchors had their say before this manager is ever
+            // consulted — the delegating one tries them first — so a merged copy of every system
+            // certificate is not needed to answer the one question this manager is asked.
             store.setCertificateEntry("isrg-root-x1", parseIsrgRootX1())
-            val merged = TrustManagerFactory
+            val manager = TrustManagerFactory
                 .getInstance(TrustManagerFactory.getDefaultAlgorithm())
                 .apply { init(store) }
                 .trustManagers
                 .filterIsInstance<X509TrustManager>()
-                .firstOrNull()
+                .firstOrNull() ?: error("TrustManagerFactory produced no X509TrustManager")
             DiagnosticsLog.event(
-                "LegacyTrustAnchors merged ISRG Root X1 sdk=${Build.VERSION.SDK_INT} " +
-                    "systemAnchors=${platform.size} installed=${merged != null}",
+                "LegacyTrustAnchors merged ISRG Root X1 sdk=${Build.VERSION.SDK_INT} installed=true",
             )
-            merged
+            manager
         }.onFailure {
             DiagnosticsLog.throwable("LegacyTrustAnchors could not merge ISRG Root X1", it)
         }.getOrNull()
     }
+
+    /** Set by the first successful install; the event is a startup signal, not a per-client one. */
+    private val installEventLogged = AtomicBoolean(false)
 
     /**
      * Adds the bundled root to [this] on the devices that need it, and changes nothing on the rest.
@@ -144,14 +176,77 @@ emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
      * the fault is one the whole process shares — Coil derives its client from the shared one,
      * playback and downloads build their own, and a Let's Encrypt stream host fails for all of
      * them identically.
+     *
+     * Since #88 this costs the builder almost nothing: no store is enumerated or copied here, and
+     * the manager that goes into the SSLContext only reaches for the bundled root after the
+     * platform has already said no.
      */
     fun OkHttpClient.Builder.withLegacyTrustAnchors(): OkHttpClient.Builder {
-        val manager = trustManager ?: return this
+        if (!needsBundledIsrgRoot(Build.VERSION.SDK_INT)) return this
+        val platform = platformTrustManager ?: return this
         return runCatching {
+            val manager = PlatformFirstTrustManager(platform) { isrgOnlyTrustManager }
             val context = SSLContext.getInstance("TLS").apply { init(null, arrayOf(manager), null) }
             sslSocketFactory(context.socketFactory, manager)
+            if (installEventLogged.compareAndSet(false, true)) {
+                DiagnosticsLog.event(
+                    "LegacyTrustAnchors delegating trust to platform sdk=${Build.VERSION.SDK_INT}",
+                )
+            }
+            this
         }.onFailure {
             DiagnosticsLog.throwable("LegacyTrustAnchors could not install ISRG Root X1", it)
         }.getOrDefault(this)
     }
+}
+
+/**
+ * Tries the platform manager first and falls back to the ISRG-only one built on demand (#88).
+ *
+ * Installed below API 25 in place of the old merged manager, whose whole store-enumeration cost
+ * used to run during AppGraph.init. Acceptance is the same union the merged store gave: a chain
+ * the platform verifies is accepted immediately and never reaches the fallback, and a chain it
+ * rejects gets one more chance against the bundled root. When the fallback cannot be built, the
+ * platform's own rejection is rethrown unchanged, so the handshake fails exactly as it would have
+ * without us.
+ *
+ * Stateless between checks, so concurrent handshakes can call it freely; the caching that matters
+ * lives on the far side of [fallback], which the real wiring backs with a SYNCHRONIZED lazy.
+ */
+internal class PlatformFirstTrustManager(
+    private val platform: X509TrustManager,
+    private val fallback: () -> X509TrustManager?,
+) : X509TrustManager {
+
+    override fun checkClientTrusted(chain: Array<X509Certificate>, authType: String) {
+        checkChain(chain, authType) { it.checkClientTrusted(chain, authType) }
+    }
+
+    override fun checkServerTrusted(chain: Array<X509Certificate>, authType: String) {
+        checkChain(chain, authType) { it.checkServerTrusted(chain, authType) }
+    }
+
+    private fun checkChain(
+        chain: Array<X509Certificate>,
+        authType: String,
+        verdict: (X509TrustManager) -> Unit,
+    ) {
+        try {
+            verdict(platform)
+            return
+        } catch (platformRejection: CertificateException) {
+            // Not trusted by the platform. The only chains this can still rescue are ones rooted
+            // in ISRG Root X1, which the platform image below API 25 does not carry; anything else
+            // the fallback will reject too, with its own word for why.
+            val fallbackManager = fallback() ?: throw platformRejection
+            verdict(fallbackManager)
+        }
+    }
+
+    /**
+     * The platform's issuers, unchanged. Nothing on the handshake path consults this — the
+     * SSLSocket runs the checks above — so answering from the platform manager keeps any future
+     * caller's question about platform trust honest without forcing the fallback to build.
+     */
+    override fun getAcceptedIssuers(): Array<X509Certificate> = platform.acceptedIssuers
 }

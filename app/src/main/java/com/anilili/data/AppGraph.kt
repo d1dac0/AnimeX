@@ -104,6 +104,8 @@ object AppGraph {
 
         httpClient = OkHttpClient.Builder()
             .addInterceptor(com.anilili.data.remote.MegaPlayCdnHealthInterceptor())
+            // #88: below API 25 this installs a delegating trust manager — platform verdicts
+            // first, the ISRG-only fallback built on demand — so no trust-store merge runs here.
             .withLegacyTrustAnchors()
             .dns(AppDns)
             .addInterceptor(AppDns.InterceptionRetry)
