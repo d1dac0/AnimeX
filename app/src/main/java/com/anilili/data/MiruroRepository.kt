@@ -61,6 +61,7 @@ import com.anilili.data.remote.MalClient
 import com.anilili.data.remote.MalProgressSyncResult
 import com.anilili.data.remote.MalProgressSyncSkipReason
 import com.anilili.data.remote.MediaListProgressSnapshot
+import com.anilili.data.remote.NonInteractiveChallenge
 import com.anilili.data.remote.PipeClient
 import com.anilili.data.remote.PipeBridge
 import com.anilili.data.remote.malProgressSkipReason
@@ -2846,7 +2847,11 @@ class MiruroRepository(
         val started = System.currentTimeMillis()
         val resolved = try {
             withTimeoutOrNull(PREHEAT_TIMEOUT_MS) {
-                sources(episode.pipeId, preferred, variant, anilistId, allowInteractiveChallenges = false)
+                // Runs under the episode on screen, so a Cloudflare challenge must not open a
+                // dialog over it; the flag alone only reached AllAnime.
+                withContext(NonInteractiveChallenge.asContextElement()) {
+                    sources(episode.pipeId, preferred, variant, anilistId, allowInteractiveChallenges = false)
+                }
             }
         } catch (e: CancellationException) {
             throw e

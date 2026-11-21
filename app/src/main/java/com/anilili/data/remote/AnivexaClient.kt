@@ -380,6 +380,8 @@ class AnivexaClient(
         // response size limit below rather than around it.
         .addInterceptor(CloudflareInterceptor())
         .addInterceptor(ProviderResponseLimitInterceptor(PROVIDER_RESPONSE_MAX_BYTES))
+        // Keeps a call made under NonInteractiveChallenge marked when enqueue runs it elsewhere.
+        .eventListenerFactory(NonInteractiveChallenge.eventListenerFactory(client.eventListenerFactory))
         .connectTimeout(PROVIDER_HTTP_CALL_TIMEOUT_MS, TimeUnit.MILLISECONDS)
         .readTimeout(PROVIDER_HTTP_CALL_TIMEOUT_MS, TimeUnit.MILLISECONDS)
         .callTimeout(PROVIDER_HTTP_CALL_TIMEOUT_MS, TimeUnit.MILLISECONDS)
