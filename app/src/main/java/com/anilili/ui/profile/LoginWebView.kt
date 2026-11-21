@@ -7,6 +7,7 @@ import android.view.KeyEvent
 import android.view.ViewGroup
 import android.webkit.CookieManager
 import android.webkit.JavascriptInterface
+import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
@@ -400,6 +401,10 @@ fun LoginWebView(
     var tvFocusInFrame by remember(authorizeUrl) { mutableStateOf(false) }
     var factoryAttempt by remember(authorizeUrl) { mutableIntStateOf(0) }
     var challengeStuck by remember(authorizeUrl) { mutableStateOf(false) }
+    // Views whose renderer is gone: their release skips the page calls and only tears them down.
+    val deadRendererViews = remember {
+        java.util.Collections.newSetFromMap(java.util.WeakHashMap<WebView, Boolean>())
+    }
 
     // Closing the editor keeps what was typed and leaves focus on the field it was editing —
     // never advancing to the form's submit, which is what Back used to do. Both routes into this
@@ -551,7 +556,9 @@ fun LoginWebView(
                 .fillMaxSize()
                 .then(if (device.isTv) Modifier else Modifier.windowInsetsPadding(WindowInsets.safeDrawing)),
         ) {
-            key(authorizeUrl, factoryAttempt) {
+            // Not composed while a dead renderer's retry state is up: a fresh view would load the
+            // page straight away and hide the state the viewer is meant to see. Retry clears it.
+            if (loadProblem != LoginLoadProblem.RENDERER_GONE) key(authorizeUrl, factoryAttempt) {
                 AndroidView(
                     modifier = Modifier.fillMaxSize(),
                     factory = { ctx ->
@@ -715,6 +722,38 @@ fun LoginWebView(
                                             "status=${errorResponse?.statusCode ?: 0}",
                                     )
                                 }
+
+                                // Every other WebView in the app answers this; the login page did
+                                // not, and the default false tells the platform to take the app
+                                // process down with the renderer — on API 26+ the renderer is
+                                // shared, so one reclaimed on a starved Fire TV stick while the
+                                // login page was open closed the app without a trace (the silent
+                                // exit PaheBridge documents). Drop the dead view and show the
+                                // retry state; Retry builds a fresh WebView.
+                                @android.annotation.TargetApi(Build.VERSION_CODES.O)
+                                override fun onRenderProcessGone(
+                                    view: WebView?,
+                                    detail: RenderProcessGoneDetail?,
+                                ): Boolean {
+                                    DiagnosticsLog.event(
+                                        category = "auth",
+                                        name = "oauth.renderer_gone",
+                                        attributes = mapOf(
+                                            "host" to authorizeUrl.oauthHost(),
+                                            "didCrash" to detail?.didCrash(),
+                                            "priority" to detail?.rendererPriorityAtExit(),
+                                        ),
+                                    )
+                                    view?.let(deadRendererViews::add)
+                                    if (view == null || webView === view) webView = null
+                                    tvEditor = null
+                                    tvFocusInFrame = false
+                                    challengeStuck = false
+                                    pageLoading = false
+                                    loadProblem = LoginLoadProblem.RENDERER_GONE
+                                    factoryAttempt++
+                                    return true
+                                }
                             }
                             if (device.isTv) {
                                 addJavascriptInterface(
@@ -814,8 +853,12 @@ fun LoginWebView(
                         // Persist whatever the session left behind before the view goes away, so a
                         // challenge already passed is not asked for again on the next attempt.
                         runCatching { CookieManager.getInstance().flush() }
-                        web.stopLoading()
-                        web.loadUrl("about:blank")
+                        // A dead renderer has no page to stop, and a load would only ask the view
+                        // to start another one.
+                        if (!deadRendererViews.remove(web)) {
+                            web.stopLoading()
+                            web.loadUrl("about:blank")
+                        }
                         web.clearHistory()
                         web.removeAllViews()
                         WebViewProcessController.release(web, "account-login")
@@ -1068,6 +1111,12 @@ internal enum class LoginLoadProblem(
     WEBVIEW_UNAVAILABLE(
         title = "Secure login isn't available on this device.",
         guidance = "Install or enable Android System WebView, then restart Anilili and try again.",
+    ),
+
+    /** The page's renderer crashed or was reclaimed for memory; a fresh WebView usually works. */
+    RENDERER_GONE(
+        title = "The login page stopped.",
+        guidance = "The device ran short of memory or the page crashed. Try again.",
     ),
 }
 

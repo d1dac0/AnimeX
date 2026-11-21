@@ -14,6 +14,16 @@ class LoginLoadProblemTest {
     }
 
     @Test
+    fun aDeadRendererOffersARetryRatherThanAWebViewInstall() {
+        // The renderer being reclaimed says nothing about WebView being missing: sending the
+        // viewer off to install it would be wrong, and Retry builds a fresh view that usually works.
+        val problem = LoginLoadProblem.RENDERER_GONE
+
+        assertFalse(problem.guidance.contains("Android System WebView"))
+        assertTrue(problem.guidance.contains("Try again"))
+    }
+
+    @Test
     fun networkProblemMentionsDnsBecauseAniListCanBeRegionallyBlocked() {
         assertTrue(LoginLoadProblem.NETWORK.guidance.contains("private DNS"))
     }
