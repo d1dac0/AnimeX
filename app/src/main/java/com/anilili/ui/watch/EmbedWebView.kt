@@ -1468,6 +1468,7 @@ fun EmbedWebView(
     }
     }
 
+    var tvCenterDownTime by remember { mutableLongStateOf(-1L) }
     val remoteModifier = if (device.isTv && focusPlayerOnStart && !resumeDialogVisible) {
         Modifier
             // Reports for the WebView and every control drawn over it; see [tvFocusLostTarget].
@@ -1487,6 +1488,10 @@ fun EmbedWebView(
                         KeyEventType.KeyUp -> dismissTvChrome()
                         else -> false
                     }
+                }
+                // The WebView may have handed focus to Play after opening the controls.
+                if (event.key == Key.DirectionCenter && event.nativeKeyEvent.downTime == tvCenterDownTime) {
+                    return@onPreviewKeyEvent true
                 }
                 if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
                 // Digits are handled here as well as in the WebView's own key hook below, because
@@ -1608,6 +1613,9 @@ fun EmbedWebView(
                             // stayed up and the episode never closed. Report it unhandled so it
                             // reaches the screen's Back handling.
                             if (event.keyCode == KeyEvent.KEYCODE_BACK) return false
+                            if (device.isTv && event.keyCode == KeyEvent.KEYCODE_DPAD_CENTER &&
+                                event.downTime == tvCenterDownTime
+                            ) return true
                             if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
                                 when {
                                     // Left and Right travel the timeline and nothing else; the
@@ -1633,6 +1641,13 @@ fun EmbedWebView(
                                         return true
                                     }
                                     device.isTv && opensTvPlayerControls(event.keyCode) -> {
+                                        if (!tvControlsVisible && event.keyCode == KeyEvent.KEYCODE_DPAD_CENTER) {
+                                            tvCenterDownTime = event.downTime
+                                            if (webIsPlaying) {
+                                                dispatchWebPlayerCommand(this, "pause", fallbackScript = PAUSE_VIDEO_JS)
+                                                webIsPlaying = false
+                                            }
+                                        }
                                         val down = event.keyCode == KeyEvent.KEYCODE_DPAD_DOWN
                                         mainHandler.post {
                                             if (!tvControlsVisible) tvControlsOpenedByDown = down

@@ -1844,6 +1844,7 @@ fun PlayerSurface(
     }
     }
 
+    var tvCenterDownTime by remember { mutableLongStateOf(-1L) }
     val remoteModifier = if (device.isTv && focusPlayerOnStart) {
         Modifier
             .focusRequester(tvPlayerFocus)
@@ -1864,6 +1865,10 @@ fun PlayerSurface(
                         KeyEventType.KeyUp -> dismissTvChrome()
                         else -> false
                     }
+                }
+                // Keep the release and repeats away from the newly focused Play button.
+                if (event.key == Key.DirectionCenter && event.nativeKeyEvent.downTime == tvCenterDownTime) {
+                    return@onPreviewKeyEvent true
                 }
                 if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
                 val mediaSeekOffsetMs = when (event.nativeKeyEvent.keyCode) {
@@ -1990,6 +1995,10 @@ fun PlayerSurface(
                     return@onPreviewKeyEvent true
                 }
                 if (!tvControlsVisible) {
+                    if (event.key == Key.DirectionCenter && event.nativeKeyEvent.repeatCount == 0) {
+                        tvCenterDownTime = event.nativeKeyEvent.downTime
+                        controller?.takeIf { it.isPlaying }?.pause()
+                    }
                     DiagnosticsLog.event("PlayerSurface TV controls opened key=${event.key}")
                     tvControlsOpenedByDown = event.key == Key.DirectionDown
                     tvControlsVisible = true
